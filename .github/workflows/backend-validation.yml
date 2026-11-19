@@ -1,0 +1,53 @@
+name: Backend Validation
+
+on:
+  push:
+    branches:
+      - phase-6-runtime-validation
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  backend-validation:
+    name: Backend Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: sqlite:///./disposable_validation.db
+      UPLOAD_DIR: ./uploads_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run focused Phase 7 tests
+        run: python -m pytest tests/test_reports_api.py -q
+
+      - name: Run complete backend test suite
+        run: python -m pytest -q
+
+      - name: Validate Alembic migrations
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+          CURRENT_REV=$(python -m alembic current 2>&1)
+          echo "$CURRENT_REV"
+          echo "$CURRENT_REV" | grep -q "20261120_09"
+          python -c "import sqlite3; conn = sqlite3.connect('disposable_validation.db'); row = conn.execute('SELECT version_num FROM alembic_version').fetchone(); assert row and row[0] == '20261120_09', f'Unexpected revision: {row}'; print(f'Confirmed migration revision: {row[0]}')"
