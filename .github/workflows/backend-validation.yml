@@ -37,10 +37,24 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run focused Phase 7 tests
-        run: python -m pytest tests/test_reports_api.py -q
+        run: |
+          python -m pytest tests/test_reports_api.py -q || {
+            echo "## Phase 7 Focused Tests Output" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            python -m pytest tests/test_reports_api.py -v --tb=short >> "$GITHUB_STEP_SUMMARY" 2>&1
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
 
       - name: Run complete backend test suite
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q || {
+            echo "## Complete Backend Test Suite Output" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            python -m pytest -v --tb=short >> "$GITHUB_STEP_SUMMARY" 2>&1
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
 
       - name: Validate Alembic migrations
         run: |
