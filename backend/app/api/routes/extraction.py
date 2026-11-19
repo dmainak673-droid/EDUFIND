@@ -3,13 +3,15 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models.document import Document, DocumentPage
 from app.db.models.extraction import Citation, CitationMention, Claim, ClaimCitation, ExtractionRun
 from app.db.models.research import EvidenceRecord, ResearchSource, SourceIdentifier, SourceMatch
+from app.api.deps import get_request_settings
+from app.core.config import Settings
 from app.db.session import get_db
 from app.schemas.document import DocumentResponse
 from app.schemas.extraction import (
@@ -25,6 +27,14 @@ from app.schemas.extraction import (
 )
 from app.services.extraction_persistence import persist_extraction
 from app.services.extraction_service import extract_document_content
+from app.services.analysis_pipeline import AnalysisBusyError, assert_no_active_analysis
+from app.services.operation_lock import (
+    OperationOwnershipLost,
+    heartbeat_operation,
+    monitor_operation_heartbeat,
+    operation_guard,
+    renew_operation_in_transaction,
+)
 
 router = APIRouter(tags=["extraction"])
 logger = logging.getLogger(__name__)
@@ -212,8 +222,14 @@ def get_extraction_status(document_id: str, db: Session = Depends(get_db)) -> Ex
 
 
 @router.post("/documents/{document_id}/extract", response_model=ExtractionStatusResponse)
-def extract_document(document_id: str, response: Response, db: Session = Depends(get_db)) -> ExtractionStatusResponse:
+def extract_document(document_id: str, response: Response, db: Session = Depends(get_db),
+                     settings: Settings = Depends(get_request_settings),
+                     _operation: str | None = Depends(operation_guard("EXTRACTION"))) -> ExtractionStatusResponse:
     document = _find_document(document_id, db)
+    try:
+        assert_no_active_analysis(db, document.id)
+    except AnalysisBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if document.extraction_status == "OCR_REQUIRED":
         raise HTTPException(status_code=422, detail="No extractable text is available; OCR is not implemented.")
 
@@ -226,6 +242,7 @@ def extract_document(document_id: str, response: Response, db: Session = Depends
 
     now = datetime.now(UTC)
     if run is None:
+        renew_operation_in_transaction(db, document.id, _operation, settings)
         run = ExtractionRun(id=str(uuid4()), document_id=document.id, status="RUNNING", started_at=now)
         db.add(run)
         try:
@@ -241,6 +258,7 @@ def extract_document(document_id: str, response: Response, db: Session = Depends
                 response.status_code = 202
                 return _status_response(document.id, run)
     else:
+        renew_operation_in_transaction(db, document.id, _operation, settings)
         run.status = "RUNNING"
         run.error_message = None
         run.claims_count = 0
@@ -252,8 +270,16 @@ def extract_document(document_id: str, response: Response, db: Session = Depends
     try:
         pages = db.scalars(
             select(DocumentPage).where(DocumentPage.document_id == document.id).order_by(DocumentPage.page_number)
-        ).yield_per(50)
-        extraction = extract_document_content(pages)
+        ).all()
+        db.commit()
+
+        def heartbeat() -> None:
+            run.updated_at = datetime.now(UTC)
+            heartbeat_operation(db, document.id, _operation, settings)
+
+        with monitor_operation_heartbeat(db, document.id, _operation, "EXTRACTION", settings):
+            extraction = extract_document_content(pages, heartbeat=heartbeat)
+        renew_operation_in_transaction(db, document.id, _operation, settings)
         claims_count, citations_count = persist_extraction(db, document.id, extraction)
         run.status = "COMPLETED"
         run.claims_count = claims_count
@@ -261,17 +287,24 @@ def extract_document(document_id: str, response: Response, db: Session = Depends
         run.completed_at = datetime.now(UTC)
         run.error_message = None
         db.commit()
+    except OperationOwnershipLost as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Extraction ownership was lost; retry the request.") from exc
     except Exception as exc:
         db.rollback()
-        failed_run = db.scalar(select(ExtractionRun).where(ExtractionRun.document_id == document.id))
-        if failed_run is not None:
-            failed_run.status = "FAILED"
-            failed_run.error_message = "Extraction failed. The request may be retried."
-            failed_run.completed_at = datetime.now(UTC)
-            try:
+        try:
+            renew_operation_in_transaction(db, document.id, _operation, settings)
+            failed = db.execute(update(ExtractionRun).where(
+                ExtractionRun.id == run.id, ExtractionRun.status == "RUNNING",
+            ).values(status="FAILED", error_message="Extraction failed. The request may be retried.",
+                     completed_at=datetime.now(UTC), updated_at=datetime.now(UTC)))
+            if failed.rowcount == 1:
                 db.commit()
-            except SQLAlchemyError:
+            else:
                 db.rollback()
+        except OperationOwnershipLost as lost:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Extraction ownership was lost; retry the request.") from lost
         logger.error("Claim/citation extraction failed document_id=%s error_type=%s", document.id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="Claim and citation extraction failed.") from exc
     return _status_response(document.id, run)

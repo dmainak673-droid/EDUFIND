@@ -16,6 +16,7 @@ from app.db.session import get_db
 from app.schemas.document import DocumentListResponse, DocumentResponse, UploadResponse
 from app.services.pdf_service import EncryptedPdfError, InvalidPdfError, extract_pdf
 from app.services.storage import LocalDocumentStorage
+from app.services.operation_lock import operation_guard
 
 router = APIRouter(tags=["documents"])
 logger = logging.getLogger(__name__)
@@ -163,6 +164,7 @@ def delete_document(
     document_id: str,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_request_settings),
+    _operation: str | None = Depends(operation_guard("DELETE")),
 ) -> None:
     record = _find_document(document_id, db)
     storage = LocalDocumentStorage(settings.upload_dir)

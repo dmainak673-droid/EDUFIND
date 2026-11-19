@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,11 +15,15 @@ from app.db.models.extraction import Citation, Claim, ClaimCitation
 from app.db.models.research import EvidenceRecord, EvidenceRetrievalRun, ResearchSource, SourceIdentifier, SourceMatch
 from app.services.research_providers import CrossrefClient, OpenAlexClient, Publication, ProviderError, ResearchHttp, normalize_doi, normalize_title
 from app.services.source_matching import score_publication
+from app.services.operation_lock import OperationOwnershipLost
 
 logger = logging.getLogger(__name__)
 
 
-def retrieve_document_evidence(db: Session, document_id: str, settings: Settings, http: ResearchHttp | None = None) -> EvidenceRetrievalRun:
+def retrieve_document_evidence(db: Session, document_id: str, settings: Settings, http: ResearchHttp | None = None,
+                               heartbeat: Callable[[], None] | None = None,
+                               ownership_check: Callable[[], None] | None = None,
+                               provider_heartbeat: Callable[[], AbstractContextManager] | None = None) -> EvidenceRetrievalRun:
     owned_http = http or ResearchHttp(timeout=settings.research_http_timeout_seconds, retries=settings.research_retry_attempts)
     crossref = CrossrefClient(owned_http, settings.crossref_api_url, settings.crossref_mailto)
     openalex = OpenAlexClient(owned_http, settings.openalex_api_url, settings.openalex_api_key)
@@ -25,7 +31,12 @@ def retrieve_document_evidence(db: Session, document_id: str, settings: Settings
     if run and run.status == "COMPLETED":
         if http is None: owned_http.close()
         return run
+    if run and run.status == "RUNNING":
+        if http is None: owned_http.close()
+        return run
     now = datetime.now(UTC)
+    if ownership_check is not None:
+        ownership_check()
     if run is None:
         run = EvidenceRetrievalRun(id=str(uuid4()), document_id=document_id, status="RUNNING", started_at=now)
         db.add(run)
@@ -43,21 +54,31 @@ def retrieve_document_evidence(db: Session, document_id: str, settings: Settings
             return competing_run
         raise
     db.refresh(run)
+    if ownership_check is not None:
+        ownership_check()
     citations = db.scalars(select(Citation).where(Citation.document_id == document_id).order_by(Citation.id)).all()
     # Reprocessing replaces this document's evidence and matching results in the same transaction.
     citation_ids = [c.id for c in citations]
     if citation_ids:
         db.execute(delete(EvidenceRecord).where(EvidenceRecord.citation_id.in_(citation_ids)))
         db.execute(delete(SourceMatch).where(SourceMatch.citation_id.in_(citation_ids)))
+        db.commit()
     failed_provider_calls = 0
     try:
         for citation in citations:
+            if ownership_check is not None:
+                ownership_check()
+                db.commit()
             candidates: list[Publication] = []
             doi = normalize_doi(citation.doi)
             if doi:
                 for operation in (lambda: crossref.by_doi(doi), lambda: openalex.by_doi(doi)):
                     try:
-                        value = operation()
+                        if provider_heartbeat is None:
+                            value = operation()
+                        else:
+                            with provider_heartbeat():
+                                value = operation()
                         candidates.extend(value if isinstance(value, list) else [value])
                     except ProviderError as exc:
                         if exc.kind not in {"not_found"}: failed_provider_calls += 1
@@ -65,10 +86,18 @@ def retrieve_document_evidence(db: Session, document_id: str, settings: Settings
             else:
                 query = citation.publication_title or citation.raw_reference
                 for operation in (lambda: crossref.search(query), lambda: openalex.search(query)):
-                    try: candidates.extend(operation())
+                    try:
+                        if provider_heartbeat is None:
+                            value = operation()
+                        else:
+                            with provider_heartbeat():
+                                value = operation()
+                        candidates.extend(value)
                     except ProviderError as exc:
                         failed_provider_calls += 1
                         logger.info("Provider search unavailable provider=%s kind=%s", exc.provider, exc.kind)
+            if ownership_check is not None:
+                ownership_check()
             unique: dict[str, Publication] = {}
             for publication in candidates:
                 if publication.identifier:
@@ -111,21 +140,39 @@ def retrieve_document_evidence(db: Session, document_id: str, settings: Settings
                         mention_id=mention_id, availability="UNAVAILABLE", retrieved_text=None, source_url=None))
             run.citations_processed += 1
             db.flush()
+            if heartbeat is not None:
+                heartbeat()
+            elif ownership_check is not None:
+                ownership_check()
+                db.commit()
+        if ownership_check is not None:
+            ownership_check()
         run.status = "PARTIAL" if failed_provider_calls else "COMPLETED"
         run.error_message = "Some provider requests were unavailable; retry to refresh." if failed_provider_calls else None
         run.completed_at = datetime.now(UTC)
         db.commit()
         db.refresh(run)
         return run
+    except OperationOwnershipLost:
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         logger.exception("Evidence retrieval failed document_id=%s", document_id)
-        failed_run = db.scalar(select(EvidenceRetrievalRun).where(EvidenceRetrievalRun.document_id == document_id))
-        if failed_run is not None:
-            failed_run.status = "FAILED"
-            failed_run.error_message = "Evidence retrieval failed. The request may be retried."
-            failed_run.completed_at = datetime.now(UTC)
-            db.commit()
+        try:
+            if ownership_check is not None:
+                ownership_check()
+            failed = db.execute(update(EvidenceRetrievalRun).where(
+                EvidenceRetrievalRun.id == run.id, EvidenceRetrievalRun.status == "RUNNING",
+            ).values(status="FAILED", error_message="Evidence retrieval failed. The request may be retried.",
+                     completed_at=datetime.now(UTC), updated_at=datetime.now(UTC)))
+            if failed.rowcount == 1:
+                db.commit()
+            else:
+                db.rollback()
+        except OperationOwnershipLost:
+            db.rollback()
+            raise
         raise
     finally:
         if http is None: owned_http.close()
