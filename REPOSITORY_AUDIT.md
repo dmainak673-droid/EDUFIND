@@ -70,3 +70,12 @@ All backend capabilities are missing: FastAPI app, configuration, persistence, m
 - `backend/tests/test_health.py`: health route contract test.
 - `backend/README.md`: setup and Phase 1 architecture notes.
 
+## Phase 2 implementation update (2026-11-19)
+
+- Added SQLAlchemy `documents` and `document_pages` tables, constraints, indexes, cascade behavior, and an Alembic revision. SQLite foreign-key enforcement is enabled.
+- Added bounded chunked upload handling with a 50 MiB default cap, `.pdf` filename requirement, `%PDF-` signature check, generated UUID storage names, rollback cleanup, and sanitized client errors.
+- Added pypdf metadata and per-page text extraction. Empty pages are preserved. Low/no-text files are retained with `OCR_REQUIRED`; mixed text/empty-page files use `PARTIAL`. OCR is not claimed or implemented.
+- Added frontend-compatible `POST /api/upload` plus `POST /api/documents/upload`, and paginated list, detail, and delete endpoints. Existing frontend upload response keys (`document_id`, `filename`, `size`, `title`) and multipart field `file` are retained; document results serialize camelCase fields.
+- Added isolated test fixtures and tests for signatures, empty/oversized/malformed/encrypted inputs, extraction, metadata, OCR-needed status, duplicate names/path traversal, CRUD, pagination, and upload cleanup on database failure.
+- Validation status: Python syntax and TOML checks passed; Alembic `upgrade head` and `downgrade base` both passed against a temporary SQLite database; `git diff --check` passed; pytest passed with 18 tests and one upstream Starlette/AnyIO deprecation warning. The test run used the available Python 3.14 runtime with its working Pydantic installation and a workspace-local pytest temp directory.
+

@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./edufind.db"
     upload_dir: str = "./uploads"
-    max_upload_size_bytes: int = 20 * 1024 * 1024
+    max_upload_size_bytes: int = 50 * 1024 * 1024
+    min_extractable_text_chars: int = 100
     cors_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
@@ -30,6 +31,13 @@ class Settings(BaseSettings):
     def validate_upload_limit(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("MAX_UPLOAD_SIZE_BYTES must be greater than zero")
+        return value
+
+    @field_validator("min_extractable_text_chars")
+    @classmethod
+    def validate_minimum_text(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("MIN_EXTRACTABLE_TEXT_CHARS cannot be negative")
         return value
 
     @field_validator("cors_origins", mode="before")

@@ -1,12 +1,5 @@
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-
-def test_health_matches_frontend_contract() -> None:
-    with TestClient(app) as client:
-        response = client.get("/api/health")
-
+def test_health_matches_frontend_contract(api) -> None:
+    response = api.client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.1.0"}
+    assert response.json() == {"status": "ok", "version": api.settings.app_version}
 
