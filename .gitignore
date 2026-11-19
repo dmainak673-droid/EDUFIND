@@ -12,3 +12,6 @@ __pycache__/
 *.py[cod]
 *.db
 backend/uploads/
+
+# Python package metadata
+*.egg-info/
