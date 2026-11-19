@@ -38,23 +38,29 @@ jobs:
 
       - name: Run focused Phase 7 tests
         run: |
-          python -m pytest tests/test_reports_api.py -q || {
-            echo "## Phase 7 Focused Tests Output" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            python -m pytest tests/test_reports_api.py -v --tb=short >> "$GITHUB_STEP_SUMMARY" 2>&1
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          }
+          set +e
+          python -m pytest tests/test_reports_api.py -q > pytest_out.txt 2>&1
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            head -n 25 pytest_out.txt | while IFS= read -r line; do
+              echo "::error file=tests/test_reports_api.py::$line"
+            done
+            cat pytest_out.txt
+            exit $EXIT_CODE
+          fi
 
       - name: Run complete backend test suite
         run: |
-          python -m pytest -q || {
-            echo "## Complete Backend Test Suite Output" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            python -m pytest -v --tb=short >> "$GITHUB_STEP_SUMMARY" 2>&1
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          }
+          set +e
+          python -m pytest -q > pytest_all.txt 2>&1
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            head -n 25 pytest_all.txt | while IFS= read -r line; do
+              echo "::error file=tests/conftest.py::$line"
+            done
+            cat pytest_all.txt
+            exit $EXIT_CODE
+          fi
 
       - name: Validate Alembic migrations
         run: |
