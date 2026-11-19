@@ -21,6 +21,7 @@ def _seed_analysis(api, status="COMPLETED"):
             title="A Study of Results", authors=["A. Researcher"], pdf_metadata={}, file_size=100,
             mime_type="application/pdf", page_count=1, extraction_status="EXTRACTED",
         ))
+        db.flush()
         db.add(AnalysisRun(
             id=analysis_id, document_id=document_id,
             active_document_id=document_id if status in {"QUEUED", "VERIFYING"} else None,
