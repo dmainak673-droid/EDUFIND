@@ -193,7 +193,12 @@ def test_expired_lease_takeover_and_old_owner_cannot_renew_or_release(api):
     old_token, new_token = str(uuid4()), str(uuid4())
     stale = datetime.now(UTC) - operation_lease_timeout(api.settings) - timedelta(seconds=1)
     with api.session_factory() as db:
-        db.add(ExtractionRun(id=str(uuid4()), document_id=document_id, status="RUNNING", updated_at=stale))
+        extraction_run = db.scalar(select(ExtractionRun).where(
+            ExtractionRun.document_id == document_id
+        ))
+        assert extraction_run is not None
+        extraction_run.status = "RUNNING"
+        extraction_run.updated_at = stale
         db.add(DocumentOperationLease(document_id=document_id, owner_id=old_token,
             operation="EXTRACTION", heartbeat_at=stale))
         db.commit()

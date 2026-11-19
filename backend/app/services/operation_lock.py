@@ -45,16 +45,18 @@ def operation_lease_timeout(settings: Settings | None = None) -> timedelta:
 
 def acquire_operation(db: Session, document_id: str, owner_id: str, operation: str,
                       settings: Settings | None = None) -> bool:
-    db.add(DocumentOperationLease(document_id=document_id, owner_id=owner_id, operation=operation,
-                                  heartbeat_at=datetime.now(UTC)))
-    try:
-        db.commit()
-        return True
-    except IntegrityError:
-        db.rollback()
-    except OperationalError:
-        db.rollback()
-        return False
+    existing = db.get(DocumentOperationLease, document_id)
+    if existing is None:
+        db.add(DocumentOperationLease(document_id=document_id, owner_id=owner_id, operation=operation,
+                                      heartbeat_at=datetime.now(UTC)))
+        try:
+            db.commit()
+            return True
+        except IntegrityError:
+            db.rollback()
+        except OperationalError:
+            db.rollback()
+            return False
     now = datetime.now(UTC)
     cutoff = now - operation_lease_timeout(settings)
     lease = db.get(DocumentOperationLease, document_id)
@@ -69,7 +71,7 @@ def acquire_operation(db: Session, document_id: str, owner_id: str, operation: s
         DocumentOperationLease.document_id == document_id,
         DocumentOperationLease.owner_id == lease.owner_id,
         DocumentOperationLease.heartbeat_at <= cutoff,
-    ).values(owner_id=owner_id, operation=operation, heartbeat_at=now))
+    ).values(owner_id=owner_id, operation=operation, heartbeat_at=now).execution_options(synchronize_session=False))
     if result.rowcount != 1:
         db.rollback()
         return False
@@ -99,7 +101,7 @@ def renew_operation_in_transaction(db: Session, document_id: str, owner_id: str,
         DocumentOperationLease.document_id == document_id,
         DocumentOperationLease.owner_id == owner_id,
         DocumentOperationLease.heartbeat_at > now - operation_lease_timeout(settings),
-    ).values(heartbeat_at=now))
+    ).values(heartbeat_at=now).execution_options(synchronize_session=False))
     if result.rowcount != 1:
         db.rollback()
         raise OperationOwnershipLost("Document operation lease was lost or expired.")
@@ -206,11 +208,13 @@ def operation_guard(operation: str):
         try:
             canonical_id = str(UUID(document_id))
         except (ValueError, AttributeError):
-            return None
+            yield None
+            return
         document = db.get(Document, canonical_id)
         if document is None:
             # Route-level UUID validation retains its existing response contract.
-            return None
+            yield None
+            return
         token = str(uuid4())
         if not acquire_operation(db, document.id, token, operation, settings):
             raise HTTPException(status_code=409, detail="Another document analysis operation is active.")

@@ -61,7 +61,7 @@ def create_analysis(db: Session, document_id: str, settings: Settings) -> tuple[
             DocumentOperationLease.document_id == document_id,
             DocumentOperationLease.owner_id == old_owner,
             DocumentOperationLease.heartbeat_at <= stale_before,
-        ).values(owner_id=execution_token, operation="ANALYSIS", heartbeat_at=now))
+        ).values(owner_id=execution_token, operation="ANALYSIS", heartbeat_at=now).execution_options(synchronize_session=False))
         if claimed.rowcount != 1:
             db.rollback()
             raise AnalysisBusyError("Another document operation owns this document.")
@@ -157,7 +157,8 @@ def retry_analysis(db: Session, run: AnalysisRun, settings: Settings) -> Analysi
             if not dependency_finished:
                 lease_conditions.append(DocumentOperationLease.heartbeat_at <= stale_before)
             lease_claim = update(DocumentOperationLease).where(*lease_conditions).values(
-                owner_id=new_token, heartbeat_at=now)
+                owner_id=new_token, heartbeat_at=now
+            ).execution_options(synchronize_session=False)
             # A completed dependency may be fenced immediately; an active one
             # must first exceed its provider-derived lease window.
             claimed = db.execute(lease_claim)

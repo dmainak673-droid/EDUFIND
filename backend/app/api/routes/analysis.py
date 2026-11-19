@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -13,6 +14,7 @@ from app.schemas.analysis import AnalysisHistoryResponse, AnalysisResultResponse
 from app.services.analysis_pipeline import AnalysisBusyError, create_analysis, retry_analysis
 
 router = APIRouter(tags=["analysis"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/documents/{document_id}/analyze", response_model=AnalysisRunResponse)
@@ -24,6 +26,7 @@ def analyze_document(document_id: str, response: Response, db: Session = Depends
     except AnalysisBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("Analysis creation failed for document %s", document.id)
         db.rollback()
         raise HTTPException(status_code=500, detail="Analysis could not be started.") from exc
     if run.status in {"QUEUED", "VALIDATING", "EXTRACTING", "EXTRACTING_CLAIMS", "RETRIEVING_EVIDENCE", "VERIFYING"}:
@@ -68,9 +71,10 @@ def retry(analysis_id: str, response: Response, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception:
+        logger.exception("Analysis retry failed for %s", analysis_id)
         db.rollback()
-        raise HTTPException(status_code=500, detail="Analysis retry failed.") from exc
+        raise HTTPException(status_code=500, detail="Analysis retry failed.")
     if run.status in {"QUEUED", "VALIDATING", "EXTRACTING", "EXTRACTING_CLAIMS", "RETRIEVING_EVIDENCE", "VERIFYING"}:
         response.status_code = 202
     return AnalysisRunResponse.model_validate(run, from_attributes=True)
