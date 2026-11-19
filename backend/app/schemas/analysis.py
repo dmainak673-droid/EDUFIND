@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class AnalysisVerdictResponse(BaseModel):
@@ -67,7 +67,10 @@ class AnalysisStageResponse(BaseModel):
 
 class AnalysisRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-    analysis_id: str = Field(alias="analysisId")
+    analysis_id: str = Field(
+        validation_alias=AliasChoices("id", "analysisId"),
+        serialization_alias="analysisId",
+    )
     document_id: str = Field(alias="documentId")
     status: str
     current_stage: str | None = Field(alias="currentStage")
