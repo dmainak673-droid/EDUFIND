@@ -1,6 +1,7 @@
 from app.db.models.document import Document, DocumentPage
 from app.db.models.analysis import AnalysisRun, AnalysisStageExecution
 from app.db.models.operation import DocumentOperationLease
+from app.db.models.report import Report
 from app.db.models.extraction import (
     Citation,
     CitationMention,
@@ -25,6 +26,7 @@ __all__ = [
     "EvidenceRecord",
     "EvidenceRetrievalRun",
     "ResearchSource",
+    "Report",
     "SourceIdentifier",
     "SourceMatch",
     "VerificationEvidenceLink",
