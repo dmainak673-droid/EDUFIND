@@ -2,9 +2,9 @@
 
 FastAPI backend for the EDUFIND scientific research verification platform. The API follows the camelCase and enum contracts in `../src/types/verification.ts`.
 
-## Current implementation: Phases 1–4
+## Current implementation: Phases 1–5
 
-The backend has environment-backed settings, JSON logs, SQLAlchemy 2 engine/session setup, CORS, a health endpoint, SQLite development support, and Alembic migrations. Document uploads are validated, stored under server-generated names, and extracted page by page with pypdf. Phase 3 adds deterministic scientific-claim and citation extraction, bibliography parsing, citation mentions, claim/citation links, and persisted extraction status. Phase 4 retrieves scholarly metadata from Crossref and OpenAlex, scores citation-to-source matches, and persists abstract or metadata evidence with claim/citation/page provenance.
+The backend has environment-backed settings, JSON logs, SQLAlchemy 2 engine/session setup, CORS, a health endpoint, SQLite development support, and Alembic migrations. Document uploads are validated, stored under server-generated names, and extracted page by page with pypdf. Phase 3 adds deterministic scientific-claim and citation extraction; Phase 4 retrieves Crossref/OpenAlex metadata and persists traceable evidence; Phase 5 adds evidence-grounded Gemini claim assessments with structured outputs, persisted verdict history, and evidence-reference validation.
 
 ## Setup (Windows PowerShell)
 
@@ -28,6 +28,7 @@ Use `alembic upgrade head` to create/update the schema. After model changes, cre
 ## Configuration
 
 See `.env.example`. SQLite is the initial local database. Set `DATABASE_URL` to a PostgreSQL SQLAlchemy URL for a PostgreSQL deployment and install `.[postgres]`. `UPLOAD_DIR` selects the private document storage directory. `MAX_UPLOAD_SIZE_BYTES` defaults to 50 MiB, matching the current frontend's upload limit; `MIN_EXTRACTABLE_TEXT_CHARS` controls when a PDF is flagged as requiring OCR. `CORS_ORIGINS` accepts a comma-separated list. Crossref is public and requires no key; set `CROSSREF_MAILTO` to use its polite pool. OpenAlex works without a key for light usage; `OPENALEX_API_KEY` is optional. `CROSSREF_API_URL`, `OPENALEX_API_URL`, `RESEARCH_HTTP_TIMEOUT_SECONDS`, and `RESEARCH_RETRY_ATTEMPTS` configure provider clients. Requests use finite timeouts, bounded retries/backoff, and a descriptive User-Agent. Credentials are not returned in API responses or logs.
+Set `GEMINI_API_KEY` in the backend environment to enable AI assessments. `GEMINI_MODEL` defaults to `gemini-3.8-flash`; `GEMINI_TIMEOUT_SECONDS` and `GEMINI_RETRY_ATTEMPTS` set bounded request behavior. The key is never logged or returned. Tests use a mocked provider and do not require a key.
 
 ## Document endpoints
 
@@ -50,6 +51,12 @@ See `.env.example`. SQLite is the initial local database. Set `DATABASE_URL` to 
 | `GET /api/claims/{claim_id}/evidence` | Returns retrieved records associated with one claim. |
 | `GET /api/citations/{citation_id}/matches` | Returns candidate source matches, transparent score, method, and match status. |
 | `GET /api/sources/{source_id}` | Returns cached publication metadata, abstracts when supplied, and provider/DOI identifiers. |
+| `POST /api/claims/{claim_id}/verify` | Verifies one extracted claim against its associated abstract/full-text evidence records. No assessable text produces a persisted `INSUFFICIENT_EVIDENCE` abstention without an API call. |
+| `GET /api/claims/{claim_id}/verification` | Returns the latest persisted claim assessment and validated evidence references. |
+| `POST /api/documents/{document_id}/verify` | Starts a synchronous verification run for all extracted claims. An active document run returns `202`; a run can be `COMPLETED`, `PARTIAL`, or `FAILED`. |
+| `GET /api/documents/{document_id}/verification-status` | Returns the latest verification run state and progress counts. |
+| `GET /api/documents/{document_id}/verification-results` | Returns the latest run's stored claim assessments. |
+| `GET /api/verifications/{verification_id}` | Returns one run and its results. |
 
 Stored PDFs are named with generated UUIDs. Responses never contain filesystem paths. Extraction statuses are `EXTRACTED`, `PARTIAL`, and `OCR_REQUIRED`. Empty pages remain represented with their original page numbers. Scanned-only/low-text PDFs are retained and clearly marked; OCR is not implemented.
 
@@ -73,11 +80,20 @@ Stored PDFs are named with generated UUIDs. Responses never contain filesystem p
 - Provider timeouts, invalid JSON, HTTP failures, and rate limits are handled with bounded retries and sanitized errors. External API tests use mocked responses; normal pytest makes no network requests.
 - Retrieval runs synchronously in the API process. A `RUNNING` row prevents duplicate submissions, but process interruption can leave a run requiring retry/recovery. No background worker is included.
 
+## Phase 5 verification behavior and limits
+
+- Gemini calls use Google's `google-genai` SDK with JSON/Pydantic structured output and no tools or browsing. Prompts explicitly treat claims, context, metadata, and abstracts as untrusted data, so embedded instructions cannot override the system instruction.
+- Only evidence records already linked to the claim and containing abstract/full-text text are assessable. Metadata-only records are not sent as evidence. The backend validates every model evidence ID against the records supplied for that claim and checks each returned excerpt is present verbatim (whitespace-normalized) in that record; an unknown ID, duplicate ID, or invented excerpt fails that claim rather than being stored.
+- The verdicts are `SUPPORTED`, `CONTRADICTED`, `PARTIALLY_SUPPORTED`, `INSUFFICIENT_EVIDENCE`, and `UNVERIFIABLE`. The backend abstains with deterministic `INSUFFICIENT_EVIDENCE` when there is no abstract/full text. `SUPPORTED` requires a validated direct-support excerpt; `CONTRADICTED` requires a validated contradictory excerpt. Otherwise the backend downgrades to insufficient evidence.
+- Results preserve the original claim, explanation, support/contradiction/other evidence links, limitations, confidence, evidence availability, timestamp, model, and prompt version. Confidence is confidence in the assessment, not probability that the claim is true. Abstract-only limitations are always added by the backend; no full-text inspection is claimed.
+- Runs are synchronous. One active verification run per document is enforced with a unique database key. Document runs save successful claim results and may end `PARTIAL` if individual claims fail; raw provider errors and credentials are never returned. A crashed process may leave a `RUNNING` row requiring operator recovery.
+- The existing frontend was not modified. Its current verdict enum does not match Phase 5's five verdicts, so Phase 5 exposes these results only through the new backend endpoints. The existing `GET /api/claims/{claimId}` result contract is still deferred; no verdict is fabricated into it.
+
 ## Run checks
 
 ```powershell
 pytest
 ```
 
-Pytest uses temporary databases and upload directories and makes no external API calls. Tests cover health/configuration, PDF/document management, extraction, provider response parsing, DOI validation, timeout/rate-limit handling, source matching, evidence persistence/idempotency, API responses, and cascades. Gemini verification, analysis polling, and reports are future phases.
+Pytest uses temporary databases and upload directories and makes no external API calls. Tests cover health/configuration, PDF/document management, extraction, Crossref/OpenAlex clients, DOI validation, source matching, evidence persistence, Gemini response parsing/error handling, all verdicts, unknown evidence IDs, abstention, verification APIs, and cascades. Analysis polling and reports remain future phases.
 

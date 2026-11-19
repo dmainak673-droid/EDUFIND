@@ -96,3 +96,12 @@ The remaining backend capabilities include Gemini verification, OCR/full-text re
 - Added POST retrieval, GET status, document/claim evidence, citation matches, and source detail endpoints. Existing frontend citation API returns bibliography matches and abstracts where available. Its `resolved` value means metadata match only. No frontend files changed; claim verdict detail remains deferred.
 - Limits: synchronous requests, no full-text/OCR, provider completeness varies, title-based matches may be uncertain, and claim verification is out of scope.
 
+## Phase 5 implementation update (2026-11-19)
+
+- Added the isolated official `google-genai` SDK provider using Pydantic structured JSON, configured model/API key/timeout/retry settings, no tools or browsing, sanitized provider errors, and bounded retries for transient failures.
+- Added evidence-grounded claim and document verification with five verdict categories. Abstract/full-text evidence must already be linked to the claim. Metadata-only records are excluded as evidence; missing assessable text produces a deterministic `INSUFFICIENT_EVIDENCE` result without an API call.
+- Added server-side evidence ID validation and exact excerpt checks before persistence. A supported verdict requires a direct-support record; a contradicted verdict requires a contradictory record. Unsupported references or excerpts fail that claim and do not persist a verdict.
+- Added `verification_runs`, `verification_results`, and `verification_evidence_links` with foreign keys, checks, indexes, per-document active-run uniqueness, result history, and cascade deletion; migration `20261119_05` preserves prior records.
+- Added claim verify/result, document verify/status/results, and verification-by-ID endpoints. Existing frontend files and previous endpoints are unchanged; the current frontend verdict union does not match Phase 5's verdicts, so no frontend integration was attempted.
+- Tests mock Gemini and require no key. Abstract-only evidence is labeled, confidence is assessment confidence rather than truth probability, and full-text inspection is not claimed. Runs remain synchronous and may need recovery after process interruption.
+

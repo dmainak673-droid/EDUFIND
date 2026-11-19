@@ -7,6 +7,7 @@ from app.db.models.extraction import (
     ExtractionRun,
 )
 from app.db.models.research import EvidenceRecord, EvidenceRetrievalRun, ResearchSource, SourceIdentifier, SourceMatch
+from app.db.models.verification import VerificationEvidenceLink, VerificationResult, VerificationRun
 
 __all__ = [
     "Citation",
@@ -21,5 +22,8 @@ __all__ = [
     "ResearchSource",
     "SourceIdentifier",
     "SourceMatch",
+    "VerificationEvidenceLink",
+    "VerificationResult",
+    "VerificationRun",
 ]
 

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     openalex_api_key: str = ""
     research_http_timeout_seconds: float = 8.0
     research_retry_attempts: int = 2
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_timeout_seconds: float = 45.0
+    gemini_retry_attempts: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -59,6 +63,28 @@ class Settings(BaseSettings):
         if value < 0 or value > 5:
             raise ValueError("RESEARCH_RETRY_ATTEMPTS must be between 0 and 5")
         return value
+
+    @field_validator("gemini_timeout_seconds")
+    @classmethod
+    def validate_gemini_timeout(cls, value: float) -> float:
+        if value <= 0 or value > 180:
+            raise ValueError("GEMINI_TIMEOUT_SECONDS must be in (0, 180]")
+        return value
+
+    @field_validator("gemini_retry_attempts")
+    @classmethod
+    def validate_gemini_retries(cls, value: int) -> int:
+        if value < 0 or value > 3:
+            raise ValueError("GEMINI_RETRY_ATTEMPTS must be between 0 and 3")
+        return value
+
+    @field_validator("gemini_model")
+    @classmethod
+    def validate_gemini_model(cls, value: str) -> str:
+        model = value.strip()
+        if not model or len(model) > 120:
+            raise ValueError("GEMINI_MODEL must be a non-empty model identifier")
+        return model
 
     @field_validator("cors_origins", mode="before")
     @classmethod
