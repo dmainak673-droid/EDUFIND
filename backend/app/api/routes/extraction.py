@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.document import Document, DocumentPage
 from app.db.models.extraction import Citation, CitationMention, Claim, ClaimCitation, ExtractionRun
+from app.db.models.research import EvidenceRecord, ResearchSource, SourceIdentifier, SourceMatch
 from app.db.session import get_db
 from app.schemas.document import DocumentResponse
 from app.schemas.extraction import (
@@ -35,6 +36,16 @@ def get_document_claims(document_id: str, db: Session = Depends(get_db)) -> Clai
     claims = db.scalars(
         select(Claim).where(Claim.document_id == document.id).order_by(Claim.page_number, Claim.id)
     ).all()
+    page_text = {
+        page.page_number: page.extracted_text
+        for page in db.scalars(select(DocumentPage).where(DocumentPage.document_id == document.id)).all()
+    }
+    claims.sort(key=lambda claim: (
+        claim.page_number,
+        page_text.get(claim.page_number, "").find(claim.claim_text)
+        if page_text.get(claim.page_number, "").find(claim.claim_text) >= 0 else len(page_text.get(claim.page_number, "")),
+        claim.id,
+    ))
     claim_ids = [claim.id for claim in claims]
     link_rows = db.execute(
         select(ClaimCitation.claim_id, ClaimCitation.citation_id)
@@ -138,6 +149,7 @@ def get_frontend_document_citations(
     for citation_id, claim_id in linked_rows:
         claims_by_citation.setdefault(citation_id, []).append(claim_id)
     claim_count, citation_count = _document_counts(db, document.id)
+    resolved_ids = set(db.scalars(select(SourceMatch.citation_id).where(SourceMatch.citation_id.in_(citation_ids), SourceMatch.status == "MATCHED")).all()) if citation_ids else set()
     document_response = DocumentResponse(
         id=document.id,
         title=document.title,
@@ -150,28 +162,46 @@ def get_frontend_document_citations(
         extraction_warning=document.extraction_warning,
         total_claims=claim_count,
         total_citations=citation_count,
-        resolved_citations=0,
-        unresolved_citations=citation_count,
+        resolved_citations=len(resolved_ids),
+        unresolved_citations=max(0, citation_count - len(resolved_ids)),
     )
     return DocumentCitationsResponse(
         document=document_response,
         citations=[
-            FrontendCitationReference(
-                citation_id=citation.id,
-                title=citation.publication_title or "",
-                authors=citation.authors,
-                year=citation.publication_year,
-                doi=citation.doi,
-                journal=citation.journal,
-                resolved=False,
-                evidence_availability="NONE",
-                linked_claim_ids=claims_by_citation.get(citation.id, []),
-                raw_reference=citation.raw_reference,
-                reference_status=citation.reference_status,
-            )
+            _frontend_citation(db, citation, claims_by_citation.get(citation.id, []), citation.id in resolved_ids)
             for citation in citations
         ],
     )
+
+
+def _frontend_citation(db: Session, citation: Citation, claim_ids: list[str], resolved: bool) -> FrontendCitationReference:
+    matched_rows = db.execute(
+        select(ResearchSource, SourceIdentifier)
+        .join(SourceMatch, SourceMatch.source_id == ResearchSource.id)
+        .outerjoin(SourceIdentifier, SourceIdentifier.source_id == ResearchSource.id)
+        .where(SourceMatch.citation_id == citation.id, SourceMatch.status == "MATCHED")
+        .order_by(SourceMatch.score.desc())
+    ).all()
+    source, identifier = next(((s, i) for s, i in matched_rows if i and i.provider in {"Crossref", "OpenAlex"}), (matched_rows[0] if matched_rows else (None, None)))
+    evidence = db.scalar(select(EvidenceRecord).where(EvidenceRecord.citation_id == citation.id).order_by(EvidenceRecord.retrieved_at.desc()))
+    provider = identifier.provider if identifier else "Unknown"
+    if provider not in {"Crossref", "OpenAlex"}: provider = "Unknown"
+    return FrontendCitationReference(
+                citation_id=citation.id,
+                title=(source.title if source else None) or citation.publication_title or "",
+                authors=([str(a.get("name") or " ".join(filter(None, [a.get("given"), a.get("family")]))) for a in source.authors if isinstance(a, dict)] if source else []) or citation.authors,
+                year=(source.publication_year if source else None) or citation.publication_year,
+                doi=(source.doi if source else None) or citation.doi,
+                journal=(source.journal if source else None) or citation.journal,
+                source_url=evidence.source_url if evidence else (f"https://doi.org/{source.doi}" if source and source.doi else None),
+                provider=provider,
+                resolved=resolved,
+                evidence_availability="ABSTRACT" if evidence and evidence.availability == "ABSTRACT" else "NONE",
+                abstract_snippet=evidence.retrieved_text[:500] if evidence and evidence.availability == "ABSTRACT" and evidence.retrieved_text else None,
+                linked_claim_ids=claim_ids,
+                raw_reference=citation.raw_reference,
+                reference_status=citation.reference_status,
+            )
 
 
 @router.get("/documents/{document_id}/extraction-status", response_model=ExtractionStatusResponse)

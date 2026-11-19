@@ -1,11 +1,11 @@
 # EDUFIND Repository Audit
 
 Audit date: 2026-11-19  
-Audited ref: `main` (`8ca67ee002b96ab800c5c0b46b4e843207ca3b4b`)
+Audited ref: `main` (repository audit updated through Phase 4)
 
 ## A. Existing architecture
 
-The repository is a React 19 + TypeScript + Vite single-page frontend. It uses React Router, Axios, and Tailwind CSS. `src/api/client.ts` points at `http://127.0.0.1:8000` by default. There is no backend directory, Python project metadata, requirements file, database, migration setup, or backend test suite in the audited revision.
+The repository contains a React 19 + TypeScript + Vite single-page frontend and a FastAPI backend under `backend/`. The frontend uses React Router, Axios, and Tailwind CSS; `src/api/client.ts` points at `http://127.0.0.1:8000` by default. The backend uses SQLAlchemy, Alembic, SQLite locally, pypdf for page text, deterministic Phase 3 extraction, and Phase 4 Crossref/OpenAlex retrieval.
 
 ## B. Frontend API contract
 
@@ -32,11 +32,11 @@ The frontend normalizes errors from a JSON `detail` field. Upload callers expect
 - Demo data and UI demo mode are present; live health checks and live-data fetch paths are wired into the screens, with demo state available as a fallback. Demo data is frontend data, not backend verification results.
 - The app package includes `@google/genai`, but the audited frontend API path does not implement a server-side verification pipeline.
 
-No PDF extraction engine exists in this repository at the audited revision. The brief's note about an existing `pypdf` migration does not match this checkout; Phase 2 will introduce pypdf unless later repository history or files establish otherwise. PyMuPDF will not be introduced.
+The backend does not implement Gemini verification, OCR, full-text retrieval, analysis polling, reports, or the frontend's claim detail response with verdict fields. PyMuPDF is not used.
 
 ## D. Missing backend features
 
-All backend capabilities are missing: FastAPI app, configuration, persistence, migrations, document upload/storage, pypdf extraction, claim and citation extraction, scholarly-source clients, evidence retrieval, Gemini verification, pipeline orchestration, result/report routes, security controls, and backend tests.
+The remaining backend capabilities include Gemini verification, OCR/full-text retrieval, pipeline orchestration and polling, result/report routes, and the frontend's claim detail endpoint. Phase 4 adds external scholarly metadata retrieval and traceable evidence records but does not verify claims.
 
 ## E. Integration risks
 
@@ -86,4 +86,13 @@ All backend capabilities are missing: FastAPI app, configuration, persistence, m
 - Added APIs for extraction trigger/status, document claim records, raw citation records, claim/citation links, and the existing frontend citation wrapper. Citation links are explicitly detected mentions, never verified evidence. Existing upload, document CRUD, health, frontend enums, and frontend files are unchanged.
 - Validation status: all 32 backend tests passed (one upstream Starlette/AnyIO deprecation warning); Alembic upgrade to head and downgrade to base passed; Python syntax/TOML checks and `git diff --check` passed.
 - Limitations: extraction is deterministic and heuristic, bibliography parsing is incomplete by design, no external resolution or evidence verification is performed, OCR is unavailable, and `/api/claims/{claimId}` remains deferred because the frontend's claim detail type requires verification fields.
+
+## Phase 4 implementation update (2026-11-19)
+
+- Added Crossref REST API v1 and OpenAlex Works API clients with DOI lookups and bounded bibliographic searches, optional configuration, request timeouts, retry/backoff, descriptive User-Agent, Crossref `mailto`, and defensive parsing of incomplete provider responses. Automated tests mock all HTTP.
+- Added DOI normalization/validation and deterministic citation matching. Matches report score, method, and `MATCHED`/`POSSIBLE`/`UNMATCHED`; metadata similarity never creates a scientific verdict.
+- Added `research_sources`, `source_identifiers`, `source_matches`, `evidence_records`, and `evidence_retrieval_runs`, with indexes, foreign keys, uniqueness/check constraints, UTC timestamps, document/citation/claim cascades, and migration `20261119_04`.
+- Added synchronous, idempotent retrieval with explicit `ABSTRACT`, `METADATA_ONLY`, and `UNAVAILABLE` records. Claim/citation and citation mention page/text provenance are preserved. OpenAlex abstracts are reconstructed from returned inverted indexes; no full text or Gemini is used.
+- Added POST retrieval, GET status, document/claim evidence, citation matches, and source detail endpoints. Existing frontend citation API returns bibliography matches and abstracts where available. Its `resolved` value means metadata match only. No frontend files changed; claim verdict detail remains deferred.
+- Limits: synchronous requests, no full-text/OCR, provider completeness varies, title-based matches may be uncertain, and claim verification is out of scope.
 

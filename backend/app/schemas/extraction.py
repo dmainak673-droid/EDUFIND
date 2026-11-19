@@ -92,9 +92,11 @@ class FrontendCitationReference(BaseModel):
     year: int | None = None
     doi: str | None = None
     journal: str | None = None
-    resolved: Literal[False] = False
-    evidence_availability: Literal["NONE"] = Field(default="NONE", alias="evidenceAvailability")
-    abstract_snippet: None = Field(default=None, alias="abstractSnippet")
+    resolved: bool = False
+    evidence_availability: Literal["FULL_TEXT", "ABSTRACT", "NONE"] = Field(default="NONE", alias="evidenceAvailability")
+    abstract_snippet: str | None = Field(default=None, alias="abstractSnippet")
+    source_url: str | None = Field(default=None, alias="sourceUrl")
+    provider: Literal["Crossref", "OpenAlex", "Unknown"] = "Unknown"
     linked_claim_ids: list[str] = Field(default_factory=list, alias="linkedClaimIds")
     raw_reference: str = Field(alias="rawReference")
     reference_status: Literal["BIBLIOGRAPHY", "UNMATCHED", "AMBIGUOUS"] = Field(alias="referenceStatus")

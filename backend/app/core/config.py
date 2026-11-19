@@ -18,6 +18,12 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
     log_level: str = "INFO"
+    crossref_mailto: str = ""
+    crossref_api_url: str = "https://api.crossref.org/v1"
+    openalex_api_url: str = "https://api.openalex.org"
+    openalex_api_key: str = ""
+    research_http_timeout_seconds: float = 8.0
+    research_retry_attempts: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -38,6 +44,20 @@ class Settings(BaseSettings):
     def validate_minimum_text(cls, value: int) -> int:
         if value < 0:
             raise ValueError("MIN_EXTRACTABLE_TEXT_CHARS cannot be negative")
+        return value
+
+    @field_validator("research_http_timeout_seconds")
+    @classmethod
+    def validate_research_timeout(cls, value: float) -> float:
+        if value <= 0 or value > 60:
+            raise ValueError("RESEARCH_HTTP_TIMEOUT_SECONDS must be in (0, 60]")
+        return value
+
+    @field_validator("research_retry_attempts")
+    @classmethod
+    def validate_research_retries(cls, value: int) -> int:
+        if value < 0 or value > 5:
+            raise ValueError("RESEARCH_RETRY_ATTEMPTS must be between 0 and 5")
         return value
 
     @field_validator("cors_origins", mode="before")

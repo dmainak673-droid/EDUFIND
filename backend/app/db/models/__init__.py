@@ -6,6 +6,7 @@ from app.db.models.extraction import (
     ClaimCitation,
     ExtractionRun,
 )
+from app.db.models.research import EvidenceRecord, EvidenceRetrievalRun, ResearchSource, SourceIdentifier, SourceMatch
 
 __all__ = [
     "Citation",
@@ -15,5 +16,10 @@ __all__ = [
     "Document",
     "DocumentPage",
     "ExtractionRun",
+    "EvidenceRecord",
+    "EvidenceRetrievalRun",
+    "ResearchSource",
+    "SourceIdentifier",
+    "SourceMatch",
 ]
 
