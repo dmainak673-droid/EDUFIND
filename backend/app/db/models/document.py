@@ -54,6 +54,15 @@ class Document(Base):
         passive_deletes=True,
         order_by="DocumentPage.page_number",
     )
+    claims: Mapped[list["Claim"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+    )
+    citations: Mapped[list["Citation"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+    )
+    extraction_run: Mapped["ExtractionRun | None"] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True, uselist=False
+    )
 
 
 class DocumentPage(Base):

@@ -79,3 +79,11 @@ All backend capabilities are missing: FastAPI app, configuration, persistence, m
 - Added isolated test fixtures and tests for signatures, empty/oversized/malformed/encrypted inputs, extraction, metadata, OCR-needed status, duplicate names/path traversal, CRUD, pagination, and upload cleanup on database failure.
 - Validation status: Python syntax and TOML checks passed; Alembic `upgrade head` and `downgrade base` both passed against a temporary SQLite database; `git diff --check` passed; pytest passed with 18 tests and one upstream Starlette/AnyIO deprecation warning. The test run used the available Python 3.14 runtime with its working Pydantic installation and a workspace-local pytest temp directory.
 
+## Phase 3 implementation update (2026-11-19)
+
+- Added `Claim`, `Citation`, `CitationMention`, `ClaimCitation`, and one-per-document `ExtractionRun` models with indexes, uniqueness/check constraints, and document-delete cascades. Added Alembic revision `20261119_03_claim_citation_extraction.py` without changing earlier revisions.
+- Added deterministic, dependency-free claim selection; numbered and author-year citation detection; reference-section splitting; conservative bibliography/DOI parsing; alias matching that preserves ambiguity; and transactional persistence. Extraction is idempotent after completion and failed runs can be retried.
+- Added APIs for extraction trigger/status, document claim records, raw citation records, claim/citation links, and the existing frontend citation wrapper. Citation links are explicitly detected mentions, never verified evidence. Existing upload, document CRUD, health, frontend enums, and frontend files are unchanged.
+- Validation status: all 32 backend tests passed (one upstream Starlette/AnyIO deprecation warning); Alembic upgrade to head and downgrade to base passed; Python syntax/TOML checks and `git diff --check` passed.
+- Limitations: extraction is deterministic and heuristic, bibliography parsing is incomplete by design, no external resolution or evidence verification is performed, OCR is unavailable, and `/api/claims/{claimId}` remains deferred because the frontend's claim detail type requires verification fields.
+

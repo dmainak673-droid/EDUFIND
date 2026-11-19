@@ -29,7 +29,7 @@ def api(tmp_path) -> Iterator[ApiContext]:
         database_url=f"sqlite:///{db_path.as_posix()}",
         upload_dir=str(tmp_path / "documents"),
         max_upload_size_bytes=2 * 1024 * 1024,
-        min_extractable_text_chars=80,
+        min_extractable_text_chars=20,
         cors_origins=[],
     )
     engine = _make_engine(settings.database_url)

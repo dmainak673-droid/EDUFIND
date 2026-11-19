@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_request_settings
 from app.core.config import Settings
 from app.db.models.document import Document, DocumentPage
+from app.db.models.extraction import Citation, Claim
 from app.db.session import get_db
 from app.schemas.document import DocumentListResponse, DocumentResponse, UploadResponse
 from app.services.pdf_service import EncryptedPdfError, InvalidPdfError, extract_pdf
@@ -139,8 +140,11 @@ def list_documents(
     records = db.scalars(
         select(Document).order_by(Document.created_at.desc(), Document.id).offset((page - 1) * page_size).limit(page_size)
     ).all()
+    counts = _load_document_counts(db, [record.id for record in records])
     return DocumentListResponse(
-        documents=[_to_document_response(record) for record in records],
+        documents=[
+            _to_document_response(record, *counts.get(record.id, (0, 0))) for record in records
+        ],
         page=page,
         page_size=page_size,
         total=total,
@@ -150,7 +154,8 @@ def list_documents(
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 def get_document(document_id: str, db: Session = Depends(get_db)) -> DocumentResponse:
     record = _find_document(document_id, db)
-    return _to_document_response(record)
+    counts = _load_document_counts(db, [record.id])
+    return _to_document_response(record, *counts[record.id])
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -200,7 +205,7 @@ def _find_document(document_id: str, db: Session) -> Document:
     return record
 
 
-def _to_document_response(record: Document) -> DocumentResponse:
+def _to_document_response(record: Document, claim_count: int = 0, citation_count: int = 0) -> DocumentResponse:
     return DocumentResponse(
         id=record.id,
         title=record.title,
@@ -211,7 +216,31 @@ def _to_document_response(record: Document) -> DocumentResponse:
         page_count=record.page_count,
         extraction_status=record.extraction_status,
         extraction_warning=record.extraction_warning,
+        total_claims=claim_count,
+        total_citations=citation_count,
+        resolved_citations=0,
+        unresolved_citations=citation_count,
     )
+
+
+def _load_document_counts(db: Session, document_ids: list[str]) -> dict[str, tuple[int, int]]:
+    if not document_ids:
+        return {}
+    claims = dict(
+        db.execute(
+            select(Claim.document_id, func.count(Claim.id))
+            .where(Claim.document_id.in_(document_ids))
+            .group_by(Claim.document_id)
+        ).all()
+    )
+    citations = dict(
+        db.execute(
+            select(Citation.document_id, func.count(Citation.id))
+            .where(Citation.document_id.in_(document_ids))
+            .group_by(Citation.document_id)
+        ).all()
+    )
+    return {document_id: (claims.get(document_id, 0), citations.get(document_id, 0)) for document_id in document_ids}
 
 
 def _safe_display_filename(filename: str | None) -> str:
