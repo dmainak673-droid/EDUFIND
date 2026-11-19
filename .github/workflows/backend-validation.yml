@@ -39,10 +39,10 @@ jobs:
       - name: Run focused Phase 7 tests
         run: |
           set +e
-          python -m pytest tests/test_reports_api.py -q > pytest_out.txt 2>&1
+          python -m pytest tests/test_reports_api.py -q --tb=short > pytest_out.txt 2>&1
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
-            head -n 25 pytest_out.txt | while IFS= read -r line; do
+            grep -E "^E  " pytest_out.txt | head -n 20 | while IFS= read -r line; do
               echo "::error file=tests/test_reports_api.py::$line"
             done
             cat pytest_out.txt
@@ -50,17 +50,7 @@ jobs:
           fi
 
       - name: Run complete backend test suite
-        run: |
-          set +e
-          python -m pytest -q > pytest_all.txt 2>&1
-          EXIT_CODE=$?
-          if [ $EXIT_CODE -ne 0 ]; then
-            head -n 25 pytest_all.txt | while IFS= read -r line; do
-              echo "::error file=tests/conftest.py::$line"
-            done
-            cat pytest_all.txt
-            exit $EXIT_CODE
-          fi
+        run: python -m pytest -q
 
       - name: Validate Alembic migrations
         run: |
