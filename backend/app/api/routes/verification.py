@@ -1,5 +1,5 @@
 import logging
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
@@ -21,6 +21,16 @@ from app.schemas.verification import (
     VerificationStatusResponse,
 )
 from app.services.verification_service import verify_claim, verify_document
+from app.services.analysis_pipeline import AnalysisBusyError, assert_no_active_analysis
+from app.services.operation_lock import (
+    OperationOwnershipLost,
+    acquire_operation,
+    heartbeat_operation,
+    monitor_operation_heartbeat,
+    operation_guard,
+    release_operation,
+    renew_operation_in_transaction,
+)
 
 router = APIRouter(tags=["verification"])
 logger = logging.getLogger(__name__)
@@ -30,14 +40,38 @@ logger = logging.getLogger(__name__)
 def start_claim_verification(claim_id: str, response: Response, db: Session = Depends(get_db),
                              settings: Settings = Depends(get_request_settings)) -> VerificationRunResponse:
     claim = _find(Claim, claim_id, db, "Claim not found.")
+    operation_token = str(uuid4())
+    if not acquire_operation(db, claim.document_id, operation_token, "VERIFICATION", settings):
+        raise HTTPException(status_code=409, detail="Another document analysis operation is active.")
+    try:
+        return _start_claim_verification_locked(claim, response, db, settings, operation_token)
+    finally:
+        release_operation(db, claim.document_id, operation_token)
+
+
+def _start_claim_verification_locked(claim: Claim, response: Response, db: Session,
+                                     settings: Settings, operation_token: str) -> VerificationRunResponse:
+    try:
+        assert_no_active_analysis(db, claim.document_id)
+    except AnalysisBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     active = _active_run(claim.document_id, db)
     if active is not None:
         response.status_code = 202
         return _run_response(active, db)
     try:
-        run = verify_claim(db, claim.id, settings)
+        run = verify_claim(db, claim.id, settings,
+                           heartbeat=lambda: heartbeat_operation(db, claim.document_id, operation_token,
+                                                                 settings),
+                           provider_heartbeat=lambda: monitor_operation_heartbeat(
+                               db, claim.document_id, operation_token, "VERIFICATION", settings),
+                           ownership_check=lambda: renew_operation_in_transaction(
+                               db, claim.document_id, operation_token, settings))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationOwnershipLost as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Verification ownership was lost; retry the request.") from exc
     except Exception as exc:
         db.rollback()
         logger.error("Verification run failed claim_id=%s error_type=%s", claim.id, type(exc).__name__)
@@ -59,18 +93,31 @@ def get_claim_verification(claim_id: str, db: Session = Depends(get_db)) -> Veri
 
 @router.post("/documents/{document_id}/verify", response_model=VerificationRunResponse)
 def start_document_verification(document_id: str, response: Response, db: Session = Depends(get_db),
-                                settings: Settings = Depends(get_request_settings)) -> VerificationRunResponse:
+                                settings: Settings = Depends(get_request_settings),
+                                _operation: str | None = Depends(operation_guard("VERIFICATION"))) -> VerificationRunResponse:
     document = _find(Document, document_id, db, "Document not found.")
+    try:
+        assert_no_active_analysis(db, document.id)
+    except AnalysisBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     active = _active_run(document.id, db)
     if active is not None:
         response.status_code = 202
         return _run_response(active, db)
     try:
-        run = verify_document(db, document.id, settings)
+        run = verify_document(db, document.id, settings,
+                              heartbeat=lambda: heartbeat_operation(db, document.id, _operation, settings),
+                              provider_heartbeat=lambda: monitor_operation_heartbeat(
+                                  db, document.id, _operation, "VERIFICATION", settings),
+                              ownership_check=lambda: renew_operation_in_transaction(
+                                  db, document.id, _operation, settings))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationOwnershipLost as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Verification ownership was lost; retry the request.") from exc
     except Exception as exc:
         db.rollback()
         logger.error("Verification run failed document_id=%s error_type=%s", document.id, type(exc).__name__)

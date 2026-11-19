@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from app.db.models.document import DocumentPage
@@ -19,7 +19,7 @@ class DocumentExtraction:
     mentions: list[CitationMentionDraft]
 
 
-def extract_document_content(pages: Iterable[DocumentPage]) -> DocumentExtraction:
+def extract_document_content(pages: Iterable[DocumentPage], heartbeat: Callable[[], None] | None = None) -> DocumentExtraction:
     claims: list[ClaimDraft] = []
     mentions: list[CitationMentionDraft] = []
     reference_lines: list[str] = []
@@ -34,6 +34,8 @@ def extract_document_content(pages: Iterable[DocumentPage]) -> DocumentExtractio
             continue
         claims.extend(extract_claims(body_text, page.page_number))
         mentions.extend(detect_citation_mentions(body_text, page.page_number))
+        if heartbeat is not None:
+            heartbeat()
 
     references = parse_bibliography(reference_lines)
     return DocumentExtraction(claims=claims, references=references, mentions=mentions)

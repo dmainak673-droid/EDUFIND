@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,7 @@ from app.db.models.research import EvidenceRecord
 from app.db.models.verification import VerificationEvidenceLink, VerificationResult, VerificationRun
 from app.schemas.verification import GeminiAssessment
 from app.services.gemini_provider import PROMPT_VERSION, GeminiProvider, GeminiProviderError
+from app.services.operation_lock import OperationOwnershipLost
 
 logger = logging.getLogger(__name__)
 MAX_ABSTRACT_RECORDS = 12
@@ -27,26 +30,41 @@ class AssessmentValidationError(Exception):
     """The generated assessment cannot be grounded in the supplied records."""
 
 
-def verify_claim(db: Session, claim_id: str, settings: Settings, provider: Any | None = None) -> VerificationRun:
+class VerificationOwnershipLost(Exception):
+    """This worker no longer owns the active verification run."""
+
+
+def verify_claim(db: Session, claim_id: str, settings: Settings, provider: Any | None = None,
+                 heartbeat: Callable[[], None] | None = None,
+                 provider_heartbeat: Callable[[], AbstractContextManager] | None = None,
+                 ownership_check: Callable[[], None] | None = None) -> VerificationRun:
     claim = db.get(Claim, claim_id)
     if claim is None:
         raise LookupError("Claim not found")
     document = db.get(Document, claim.document_id)
-    return _run_verification(db, document, [claim], "CLAIM", claim.id, settings, provider)
+    return _run_verification(db, document, [claim], "CLAIM", claim.id, settings, provider,
+                             heartbeat, provider_heartbeat, ownership_check)
 
 
-def verify_document(db: Session, document_id: str, settings: Settings, provider: Any | None = None) -> VerificationRun:
+def verify_document(db: Session, document_id: str, settings: Settings, provider: Any | None = None,
+                    heartbeat: Callable[[], None] | None = None,
+                    provider_heartbeat: Callable[[], AbstractContextManager] | None = None,
+                    ownership_check: Callable[[], None] | None = None) -> VerificationRun:
     document = db.get(Document, document_id)
     if document is None:
         raise LookupError("Document not found")
     claims = db.scalars(select(Claim).where(Claim.document_id == document.id).order_by(Claim.page_number, Claim.id)).all()
     if not claims:
         raise ValueError("No extracted claims are available for verification")
-    return _run_verification(db, document, claims, "DOCUMENT", None, settings, provider)
+    return _run_verification(db, document, claims, "DOCUMENT", None, settings, provider,
+                             heartbeat, provider_heartbeat, ownership_check)
 
 
 def _run_verification(db: Session, document: Document, claims: list[Claim], run_type: str,
-                      requested_claim_id: str | None, settings: Settings, provider: Any | None) -> VerificationRun:
+                      requested_claim_id: str | None, settings: Settings, provider: Any | None,
+                      heartbeat: Callable[[], None] | None = None,
+                      provider_heartbeat: Callable[[], AbstractContextManager] | None = None,
+                      ownership_check: Callable[[], None] | None = None) -> VerificationRun:
     run = VerificationRun(
         id=str(uuid4()), document_id=document.id, requested_claim_id=requested_claim_id,
         active_document_id=document.id, run_type=run_type, status="RUNNING", total_claims=len(claims),
@@ -54,6 +72,8 @@ def _run_verification(db: Session, document: Document, claims: list[Claim], run_
     )
     db.add(run)
     try:
+        if ownership_check is not None:
+            ownership_check()
         db.commit()
         db.refresh(run)
     except IntegrityError:
@@ -88,7 +108,14 @@ def _run_verification(db: Session, document: Document, claims: list[Claim], run_
                         if provider_error is not None:
                             raise provider_error
                     payload, record_map = _model_payload(claim, records)
-                    assessment = provider.assess(payload)
+                    # Release the read transaction before a blocking model call
+                    # so the independent lease heartbeat can renew on SQLite too.
+                    db.commit()
+                    if provider_heartbeat is None:
+                        assessment = provider.assess(payload)
+                    else:
+                        with provider_heartbeat():
+                            assessment = provider.assess(payload)
                     result, links = _validated_result(claim, run.id, settings.gemini_model, assessment,
                                                        records, record_map, evidence_records, omitted)
                 db.add(result)
@@ -96,32 +123,78 @@ def _run_verification(db: Session, document: Document, claims: list[Claim], run_
                 db.add_all(VerificationEvidenceLink(result_id=result.id, evidence_record_id=evidence_id,
                     relation=relation, excerpt=excerpt, rationale=rationale)
                     for evidence_id, relation, excerpt, rationale in links)
-                run.processed_claims += 1
+                if ownership_check is not None:
+                    ownership_check()
+                claimed = db.execute(update(VerificationRun).where(
+                    VerificationRun.id == run.id,
+                    VerificationRun.status == "RUNNING",
+                    VerificationRun.active_document_id == document.id,
+                ).values(processed_claims=VerificationRun.processed_claims + 1,
+                         updated_at=datetime.now(UTC)))
+                if claimed.rowcount != 1:
+                    raise VerificationOwnershipLost("Verification ownership changed during assessment.")
                 db.commit()
+                run = db.get(VerificationRun, run.id)
+                if heartbeat is not None:
+                    heartbeat()
+            except (VerificationOwnershipLost, OperationOwnershipLost):
+                db.rollback()
+                raise
             except Exception as exc:
                 db.rollback()
-                run = db.get(VerificationRun, run.id)
-                run.failed_claims += 1
-                run.error_message = "One or more claims could not be verified; inspect status and retry."
+                if ownership_check is not None:
+                    ownership_check()
+                failed = db.execute(update(VerificationRun).where(
+                    VerificationRun.id == run.id,
+                    VerificationRun.status == "RUNNING",
+                    VerificationRun.active_document_id == document.id,
+                ).values(failed_claims=VerificationRun.failed_claims + 1,
+                         error_message="One or more claims could not be verified; inspect status and retry.",
+                         updated_at=datetime.now(UTC)))
+                if failed.rowcount != 1:
+                    db.rollback()
+                    raise VerificationOwnershipLost("Verification ownership changed during assessment.") from exc
                 logger.warning("Claim verification failed claim_id=%s error_type=%s error_kind=%s",
                                claim.id, type(exc).__name__, getattr(exc, "kind", "validation"))
                 db.commit()
-        run = db.get(VerificationRun, run.id)
-        run.status = "FAILED" if run.failed_claims == run.total_claims else "PARTIAL" if run.failed_claims else "COMPLETED"
-        run.active_document_id = None
-        run.completed_at = datetime.now(UTC)
+                run = db.get(VerificationRun, run.id)
+                if heartbeat is not None:
+                    heartbeat()
+        run = db.get(VerificationRun, run.id, populate_existing=True)
+        terminal_status = "FAILED" if run.failed_claims == run.total_claims else "PARTIAL" if run.failed_claims else "COMPLETED"
+        completed = datetime.now(UTC)
+        if ownership_check is not None:
+            ownership_check()
+        terminal = db.execute(update(VerificationRun).where(
+            VerificationRun.id == run.id,
+            VerificationRun.status == "RUNNING",
+            VerificationRun.active_document_id == document.id,
+        ).values(status=terminal_status, active_document_id=None, completed_at=completed, updated_at=completed))
+        if terminal.rowcount != 1:
+            raise VerificationOwnershipLost("Verification ownership changed before completion.")
         db.commit()
+        run = db.get(VerificationRun, run.id, populate_existing=True)
         db.refresh(run)
         return run
+    except (VerificationOwnershipLost, OperationOwnershipLost):
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
-        run = db.get(VerificationRun, run.id)
-        if run is not None:
-            run.status = "FAILED"
-            run.active_document_id = None
-            run.error_message = "Verification run failed. The request may be retried."
-            run.completed_at = datetime.now(UTC)
+        if ownership_check is not None:
+            ownership_check()
+        failed_at = datetime.now(UTC)
+        failed = db.execute(update(VerificationRun).where(
+            VerificationRun.id == run.id,
+            VerificationRun.status == "RUNNING",
+            VerificationRun.active_document_id == document.id,
+        ).values(status="FAILED", active_document_id=None,
+                 error_message="Verification run failed. The request may be retried.",
+                 completed_at=failed_at, updated_at=failed_at))
+        if failed.rowcount == 1:
             db.commit()
+        else:
+            db.rollback()
         raise
     finally:
         if owns_provider and provider is not None:

@@ -122,7 +122,7 @@ def test_document_run_is_single_active_and_api_contracts_are_traceable(api, monk
     with api.session_factory() as db:
         doc_id, claim_id, evidence_id = _fixture_records(db)
     provider = FakeProvider(evidence_id=evidence_id)
-    monkeypatch.setattr(routes, "verify_document", lambda db, document_id, settings: verify_document(
+    monkeypatch.setattr(routes, "verify_document", lambda db, document_id, settings, **kwargs: verify_document(
         db, document_id, settings, provider=provider))
     response = api.client.post(f"/api/documents/{doc_id}/verify")
     assert response.status_code == 200
@@ -138,7 +138,7 @@ def test_document_run_is_single_active_and_api_contracts_are_traceable(api, monk
     assert api.client.get(f"/api/verifications/{body['verificationId']}").status_code == 200
 
     claim_provider = FakeProvider(evidence_id=evidence_id)
-    monkeypatch.setattr(routes, "verify_claim", lambda db, claim_id, settings: verify_claim(
+    monkeypatch.setattr(routes, "verify_claim", lambda db, claim_id, settings, **kwargs: verify_claim(
         db, claim_id, settings, provider=claim_provider))
     claim_run = api.client.post(f"/api/claims/{claim_id}/verify")
     assert claim_run.status_code == 200 and claim_run.json()["runType"] == "CLAIM"

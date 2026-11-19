@@ -2,9 +2,9 @@
 
 FastAPI backend for the EDUFIND scientific research verification platform. The API follows the camelCase and enum contracts in `../src/types/verification.ts`.
 
-## Current implementation: Phases 1–5
+## Current implementation: Phases 1–6
 
-The backend has environment-backed settings, JSON logs, SQLAlchemy 2 engine/session setup, CORS, a health endpoint, SQLite development support, and Alembic migrations. Document uploads are validated, stored under server-generated names, and extracted page by page with pypdf. Phase 3 adds deterministic scientific-claim and citation extraction; Phase 4 retrieves Crossref/OpenAlex metadata and persists traceable evidence; Phase 5 adds evidence-grounded Gemini claim assessments with structured outputs, persisted verdict history, and evidence-reference validation.
+The backend has environment-backed settings, JSON logs, SQLAlchemy 2 engine/session setup, CORS, a health endpoint, SQLite development support, and Alembic migrations. Document uploads are validated, stored under server-generated names, and extracted page by page with pypdf. Phase 3 adds deterministic scientific-claim and citation extraction; Phase 4 retrieves Crossref/OpenAlex metadata and persists traceable evidence; Phase 5 adds evidence-grounded Gemini claim assessments with structured outputs, persisted verdict history, and evidence-reference validation; Phase 6 orchestrates those stages as one persisted synchronous analysis.
 
 ## Setup (Windows PowerShell)
 
@@ -54,6 +54,11 @@ Set `GEMINI_API_KEY` in the backend environment to enable AI assessments. `GEMIN
 | `POST /api/claims/{claim_id}/verify` | Verifies one extracted claim against its associated abstract/full-text evidence records. No assessable text produces a persisted `INSUFFICIENT_EVIDENCE` abstention without an API call. |
 | `GET /api/claims/{claim_id}/verification` | Returns the latest persisted claim assessment and validated evidence references. |
 | `POST /api/documents/{document_id}/verify` | Starts a synchronous verification run for all extracted claims. An active document run returns `202`; a run can be `COMPLETED`, `PARTIAL`, or `FAILED`. |
+| `POST /api/documents/{document_id}/analyze` | Synchronously runs validation, persisted PDF text checks, claim/citation extraction, evidence retrieval, and verification. Returns the persisted analysis and ordered stages. |
+| `GET /api/documents/{document_id}/analysis-status` | Returns latest analysis state, current stage, work-based progress, timestamps, retries, warnings, and stage errors. |
+| `GET /api/documents/{document_id}/analyses` | Returns the document's analysis history. |
+| `GET /api/analyses/{analysis_id}` | Returns consolidated claim, citation, evidence and verification counts, verdict totals, and snapshotted claim assessments. |
+| `POST /api/analyses/{analysis_id}/retry` | Retries failed, warning, or stale interrupted analyses while retaining completed earlier stages. |
 | `GET /api/documents/{document_id}/verification-status` | Returns the latest verification run state and progress counts. |
 | `GET /api/documents/{document_id}/verification-results` | Returns the latest run's stored claim assessments. |
 | `GET /api/verifications/{verification_id}` | Returns one run and its results. |
@@ -89,11 +94,20 @@ Stored PDFs are named with generated UUIDs. Responses never contain filesystem p
 - Runs are synchronous. One active verification run per document is enforced with a unique database key. Document runs save successful claim results and may end `PARTIAL` if individual claims fail; raw provider errors and credentials are never returned. A crashed process may leave a `RUNNING` row requiring operator recovery.
 - The existing frontend was not modified. Its current verdict enum does not match Phase 5's five verdicts, so Phase 5 exposes these results only through the new backend endpoints. The existing `GET /api/claims/{claimId}` result contract is still deferred; no verdict is fabricated into it.
 
+## Phase 6 unified analysis pipeline
+
+- The analyze route is synchronous; the API persists each stage before executing it and does not claim background work. A concurrent request reuses the active analysis. A conflicting standalone Phase 3–5 operation receives `409` while unified analysis owns the per-document operation lease. Later submissions after completion create a new history entry.
+- Stages run in order: `VALIDATING`, `EXTRACTING`, `EXTRACTING_CLAIMS`, `RETRIEVING_EVIDENCE`, and `VERIFYING`. PDF text extraction already occurs during upload, so `EXTRACTING` validates and reuses the stored page text. Claim/citation extraction, provider retrieval, and Gemini verification reuse Phase 3–5 services and persisted records.
+- Stage rows retain attempts, timestamps, and sanitized errors. Heartbeats update the analysis and operation lease during extraction, retrieval, and verification. Progress is the percentage of stages that completed or completed with warnings; skipped and unfinished stages do not inflate it. A dependent `RUNNING` record keeps the analysis active and returns `202`; it is never treated as completed. Partial provider/verification results and documents with no extracted claims can complete with warnings. `INSUFFICIENT_EVIDENCE` remains a valid verification verdict.
+- Retry uses a conditional database update, a fresh analysis execution token, and a per-document operation lease. Stage changes, heartbeats, Phase 6 extraction persistence, snapshots, and finalization are fenced by that token; a previous attempt cannot commit or release a later attempt's lease. Stale verification recovery conditionally transitions the run to `FAILED`, clears its active key, and preserves all per-claim results.
+- Lease expiry is derived from the configured maximum provider request duration and retry count: the policy covers two sequential research-provider requests or the configured Gemini retry sequence, plus a 60-second database/scheduling margin. Provider calls also renew leases from a separate database session every 30 seconds, and stage callbacks update dependent-run timestamps. A worker paused beyond the calculated expiry can still lose ownership; it must discard pending writes and retry. Migration `20261120_08` adds the nullable execution-token column/index for backward-compatible rollout; new and retried analyses receive a fresh token.
+- Analysis snapshots preserve claim text/context/page, verdict, explanation, assessment confidence, evidence IDs and excerpts, relation/rationale, citation/mention provenance, source identifiers, limitations, model, prompt version, and timestamp as JSON independent of mutable phase tables. Migration `20261119_06` adds analysis/history; `20261119_07` adds document operation leases; `20261120_08` adds analysis execution fencing. Existing upload/frontend contracts remain unchanged; this phase adds no frontend integration.
+
 ## Run checks
 
 ```powershell
 pytest
 ```
 
-Pytest uses temporary databases and upload directories and makes no external API calls. Tests cover health/configuration, PDF/document management, extraction, Crossref/OpenAlex clients, DOI validation, source matching, evidence persistence, Gemini response parsing/error handling, all verdicts, unknown evidence IDs, abstention, verification APIs, and cascades. Analysis polling and reports remain future phases.
+Pytest uses temporary databases and upload directories. Phase 6 tests mock Phase 3–5 services and external providers and cover stage completion/active states, stale verification recovery, atomic retry contention, standalone operation conflicts, heartbeats, partial retrieval, insufficient evidence, durable evidence snapshots, migration upgrade/downgrade, duplicate analysis prevention, per-execution fencing, expired-lease takeover, lease renewal, late extraction/retrieval/verification workers, and provider-call heartbeat behavior.
 

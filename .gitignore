@@ -15,3 +15,6 @@ backend/uploads/
 
 # Python package metadata
 *.egg-info/
+
+# Local development environments
+.venv-codespace/

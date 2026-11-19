@@ -121,7 +121,7 @@ def test_retrieve_endpoint_contract_and_duplicate_request_prevention(api, monkey
     with api.session_factory() as db:
         document_id, _, _ = _create_retrieval_fixture(db)
     calls = []
-    def completed_run(db, document_id, settings):
+    def completed_run(db, document_id, settings, **kwargs):
         calls.append(document_id)
         run = EvidenceRetrievalRun(id=str(uuid4()), document_id=document_id, status="COMPLETED",
             citations_processed=1, sources_matched=1, started_at=datetime.now(UTC), completed_at=datetime.now(UTC))

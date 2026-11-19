@@ -13,6 +13,14 @@ from app.db.models.research import EvidenceRecord, EvidenceRetrievalRun, Researc
 from app.db.session import get_db
 from app.schemas.evidence import EvidenceListResponse, EvidenceResponse, EvidenceRunResponse, MatchResponse, SourceResponse
 from app.services.evidence_retrieval import retrieve_document_evidence
+from app.services.analysis_pipeline import AnalysisBusyError, assert_no_active_analysis
+from app.services.operation_lock import (
+    OperationOwnershipLost,
+    heartbeat_operation,
+    monitor_operation_heartbeat,
+    operation_guard,
+    renew_operation_in_transaction,
+)
 from app.services.research_providers import normalize_doi
 
 router = APIRouter(tags=["evidence"])
@@ -20,8 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/documents/{document_id}/retrieve-evidence", response_model=EvidenceRunResponse)
-def retrieve_evidence(document_id: str, response: Response, db: Session = Depends(get_db), settings: Settings = Depends(get_request_settings)) -> EvidenceRunResponse:
+def retrieve_evidence(document_id: str, response: Response, db: Session = Depends(get_db), settings: Settings = Depends(get_request_settings),
+                      _operation: str | None = Depends(operation_guard("EVIDENCE"))) -> EvidenceRunResponse:
     document = _find(Document, document_id, db, "Document not found.")
+    try:
+        assert_no_active_analysis(db, document.id)
+    except AnalysisBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if db.scalar(select(Citation.id).where(Citation.document_id == document.id)) is None:
         raise HTTPException(status_code=409, detail="Extract citations before retrieving evidence.")
     run = db.scalar(select(EvidenceRetrievalRun).where(EvidenceRetrievalRun.document_id == document.id))
@@ -31,11 +44,21 @@ def retrieve_evidence(document_id: str, response: Response, db: Session = Depend
         response.status_code = 202
         return _run_response(run)
     try:
-        run = retrieve_document_evidence(db, document.id, settings)
+        run = retrieve_document_evidence(db, document.id, settings,
+                                         heartbeat=lambda: heartbeat_operation(db, document.id, _operation, settings),
+                                         ownership_check=lambda: renew_operation_in_transaction(
+                                             db, document.id, _operation, settings),
+                                         provider_heartbeat=lambda: monitor_operation_heartbeat(
+                                             db, document.id, _operation, "EVIDENCE", settings))
+    except OperationOwnershipLost as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Evidence retrieval ownership was lost; retry the request.") from exc
     except Exception as exc:
         db.rollback()
         logger.error("Evidence retrieval failed document_id=%s error_type=%s", document.id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="Evidence retrieval failed. The request may be retried.") from exc
+    if run.status == "RUNNING":
+        response.status_code = 202
     return _run_response(run)
 
 
