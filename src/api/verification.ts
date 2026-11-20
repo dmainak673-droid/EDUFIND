@@ -120,6 +120,8 @@ export async function startDocumentAnalysis(
 ): Promise<AnalysisRunResponse> {
   const res = await apiClient.post<AnalysisRunResponse>(
     `/api/documents/${encodeURIComponent(documentId)}/analyze`,
+    undefined,
+    { timeout: 180_000 },
   );
   return res.data;
 }
@@ -173,6 +175,8 @@ export async function retryAnalysis(
 ): Promise<AnalysisRunResponse> {
   const res = await apiClient.post<AnalysisRunResponse>(
     `/api/analyses/${encodeURIComponent(analysisId)}/retry`,
+    undefined,
+    { timeout: 180_000 },
   );
   return res.data;
 }

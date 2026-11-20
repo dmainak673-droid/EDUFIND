@@ -3,9 +3,14 @@ import axios from 'axios';
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
+const DEFAULT_TIMEOUT_MS = 60_000;
+const envTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
+export const API_TIMEOUT_MS =
+  Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS;
+
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30_000,
+  timeout: API_TIMEOUT_MS,
   headers: {
     Accept: 'application/json',
   },
@@ -20,6 +25,16 @@ export interface ApiErrorInfo {
 export function normalizeApiError(error: unknown): ApiErrorInfo {
   if (axios.isAxiosError(error)) {
     if (!error.response) {
+      if (
+        error.code === 'ECONNABORTED' ||
+        (typeof error.message === 'string' && error.message.toLowerCase().includes('timeout'))
+      ) {
+        return {
+          code: 'REQUEST_FAILED',
+          status: 408,
+          message: 'The request timed out. The operation may still be processing on the server. Please inspect analysis status.',
+        };
+      }
       return {
         code: 'BACKEND_OFFLINE',
         message: `Cannot reach FastAPI backend at ${API_BASE_URL}. Start the backend server or inspect Demo Mode.`,

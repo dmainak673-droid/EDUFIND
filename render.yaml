@@ -1,0 +1,48 @@
+services:
+  # EDUFIND FastAPI Backend Web Service
+  - type: web
+    name: edufind-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter  # Starter plan or higher is required for persistent disk storage on Render
+    region: oregon
+    preDeployCommand: alembic upgrade head
+    disk:
+      name: edufind-storage
+      mountPath: /var/data/uploads
+      sizeGB: 10
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: staging
+      - key: DATABASE_URL
+        fromDatabase:
+          name: edufind-db
+          property: connectionString
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: CORS_ORIGINS
+        sync: false  # Configure with your Vercel staging frontend URL (e.g. https://edufind.vercel.app)
+      - key: GEMINI_API_KEY
+        sync: false  # Configure securely in the Render dashboard
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "45.0"
+      - key: GEMINI_RETRY_ATTEMPTS
+        value: "2"
+      - key: CROSSREF_MAILTO
+        sync: false  # Optional polite pool email address
+      - key: OPENALEX_API_KEY
+        sync: false  # Optional OpenAlex API key
+      - key: PORT
+        value: 8000
+
+databases:
+  # EDUFIND Managed PostgreSQL Database
+  - name: edufind-db
+    plan: starter
+    databaseName: edufind
+    user: edufind
+    region: oregon
