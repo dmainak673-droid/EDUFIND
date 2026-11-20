@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   AlertCircle,
   AlertTriangle,
@@ -64,7 +64,8 @@ function HighlightedText({
 
 export default function ClaimDetailsPage() {
   const { claimId = DEMO_CLAIMS[0].claimId } = useParams();
-  const { demoMode, setDemoMode } = useWorkspace();
+  const navigate = useNavigate();
+  const { demoMode, setDemoMode, activeDocumentId } = useWorkspace();
 
   const [claim, setClaim] = useState<ClaimRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -104,7 +105,10 @@ export default function ClaimDetailsPage() {
 
   const isConflictVerdict =
     claim?.verificationVerdict === 'CONTRADICTORY' ||
-    claim?.verificationVerdict === 'UNSUPPORTED';
+    claim?.verificationVerdict === 'UNSUPPORTED' ||
+    claim?.verificationVerdict === 'CONTRADICTED';
+
+  const returnDocId = claim?.documentId || (activeDocumentId !== DEMO_DOCUMENT_ID ? activeDocumentId : '') || DEMO_DOCUMENT_ID;
 
   return (
     <WorkspaceLayout
@@ -113,11 +117,11 @@ export default function ClaimDetailsPage() {
       actions={
         <div className="flex flex-wrap items-center gap-2">
           <Link
-            to={`/results/${encodeURIComponent(claim?.documentId || DEMO_DOCUMENT_ID)}`}
+            to={`/results/${encodeURIComponent(returnDocId)}`}
             className="inline-flex items-center gap-1.5 rounded-full border border-[#D9DDE3] bg-white px-3.5 py-2 text-xs font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
           >
             <ArrowLeft size={13} />
-            <span>Back to Dashboard</span>
+            <span>Back to Overview</span>
           </Link>
           {demoMode && prevDemoClaim && (
             <Link
@@ -152,12 +156,12 @@ export default function ClaimDetailsPage() {
             <AlertCircle size={20} className="mt-0.5 shrink-0 text-[#C04444]" />
             <div>
               <h2 className="text-base font-semibold text-[#101B2D]">
-                Claim record unavailable
+                Claim Verification Unavailable
               </h2>
               <p className="mt-1 text-sm text-[#4B586E]">
-                {error || `Could not retrieve claim ${claimId} from the backend.`}
+                {error || `Verification assessment has not been recorded for claim ID '${claimId}'. The document analysis may still be processing, or verification failed.`}
               </p>
-              <div className="mt-4 flex gap-2">
+              <div className="mt-5 flex flex-wrap gap-2.5">
                 <button
                   type="button"
                   onClick={loadClaim}
@@ -166,12 +170,21 @@ export default function ClaimDetailsPage() {
                   Retry
                 </button>
                 <Link
-                  to={`/claims/${DEMO_CLAIMS[0].claimId}`}
-                  onClick={() => setDemoMode(true)}
-                  className="rounded-full border border-[#D9DDE3] bg-[#F5F3ED] px-4 py-2 text-xs font-medium text-[#101B2D] no-underline"
+                  to={`/results/${encodeURIComponent(returnDocId)}`}
+                  className="rounded-full border border-[#D9DDE3] bg-white px-4 py-2 text-xs font-medium text-[#101B2D] no-underline"
+                >
+                  Return to Overview
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDemoMode(true);
+                    navigate(`/claims/${DEMO_CLAIMS[0].claimId}`);
+                  }}
+                  className="cursor-pointer rounded-full border border-[#D9DDE3] bg-[#F5F3ED] px-4 py-2 text-xs font-medium text-[#101B2D]"
                 >
                   Inspect Demo Claim
-                </Link>
+                </button>
               </div>
             </div>
           </div>

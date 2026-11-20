@@ -6,11 +6,13 @@ import {
   FileText,
   HelpCircle,
   Info,
+  Loader2,
   XCircle,
 } from 'lucide-react';
 import {
   EVIDENCE_META,
   VERDICT_META,
+  type AnalysisRunStatus,
   type EvidenceAvailability,
   type VerificationVerdict,
 } from '../../types/verification';
@@ -22,7 +24,7 @@ export function VerdictBadge({
   verdict: VerificationVerdict;
   size?: 'sm' | 'md';
 }) {
-  const meta = VERDICT_META[verdict];
+  const meta = VERDICT_META[verdict] ?? VERDICT_META.INSUFFICIENT_EVIDENCE;
   const Icon =
     verdict === 'SUPPORTED'
       ? CheckCircle2
@@ -30,7 +32,7 @@ export function VerdictBadge({
         ? AlertCircle
         : verdict === 'UNSUPPORTED'
           ? AlertTriangle
-          : verdict === 'CONTRADICTORY'
+          : verdict === 'CONTRADICTORY' || verdict === 'CONTRADICTED'
             ? XCircle
             : verdict === 'POTENTIALLY_OUTDATED'
               ? Clock
@@ -58,7 +60,7 @@ export function EvidenceBadge({
 }: {
   availability: EvidenceAvailability;
 }) {
-  const meta = EVIDENCE_META[availability];
+  const meta = EVIDENCE_META[availability] ?? EVIDENCE_META.NONE;
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium tracking-wide uppercase whitespace-nowrap"
@@ -71,6 +73,109 @@ export function EvidenceBadge({
     >
       <FileText size={11} aria-hidden="true" />
       <span>{availability.replace('_', ' ')}</span>
+    </span>
+  );
+}
+
+export type StatusBadgeValue =
+  | AnalysisRunStatus
+  | 'UPLOADED'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'READY'
+  | 'PARTIAL'
+  | 'DRAFT';
+
+export function StatusBadge({
+  status,
+  size = 'sm',
+}: {
+  status: StatusBadgeValue;
+  size?: 'sm' | 'md';
+}) {
+  let color = '#64748B';
+  let bg = 'rgba(100, 116, 139, 0.12)';
+  let border = 'rgba(100, 116, 139, 0.30)';
+  let label = status.replace(/_/g, ' ');
+  let Icon = Clock;
+  let animate = false;
+
+  switch (status) {
+    case 'COMPLETED':
+    case 'READY':
+      color = '#21875A';
+      bg = 'rgba(33, 135, 90, 0.10)';
+      border = 'rgba(33, 135, 90, 0.28)';
+      Icon = CheckCircle2;
+      label = status === 'READY' ? 'Ready' : 'Completed';
+      break;
+
+    case 'COMPLETED_WITH_WARNINGS':
+    case 'PARTIAL':
+      color = '#B17B26';
+      bg = 'rgba(177, 123, 38, 0.10)';
+      border = 'rgba(177, 123, 38, 0.28)';
+      Icon = AlertTriangle;
+      label = status === 'PARTIAL' ? 'Partial' : 'Completed with Warnings';
+      break;
+
+    case 'FAILED':
+      color = '#C04444';
+      bg = 'rgba(192, 68, 68, 0.10)';
+      border = 'rgba(192, 68, 68, 0.28)';
+      Icon = XCircle;
+      label = 'Failed';
+      break;
+
+    case 'VALIDATING':
+    case 'EXTRACTING':
+    case 'EXTRACTING_CLAIMS':
+    case 'RETRIEVING_EVIDENCE':
+    case 'VERIFYING':
+    case 'PROCESSING':
+      color = '#2563EB';
+      bg = 'rgba(37, 99, 235, 0.10)';
+      border = 'rgba(37, 99, 235, 0.28)';
+      Icon = Loader2;
+      animate = true;
+      if (status === 'PROCESSING') label = 'Processing';
+      else if (status === 'VALIDATING') label = 'Validating';
+      else if (status === 'EXTRACTING') label = 'Extracting Text';
+      else if (status === 'EXTRACTING_CLAIMS') label = 'Extracting Claims';
+      else if (status === 'RETRIEVING_EVIDENCE') label = 'Retrieving Evidence';
+      else if (status === 'VERIFYING') label = 'Verifying Claims';
+      break;
+
+    case 'QUEUED':
+      label = 'Queued';
+      break;
+    case 'UPLOADED':
+      label = 'Uploaded';
+      break;
+    case 'DRAFT':
+      label = 'Draft';
+      break;
+  }
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full font-medium whitespace-nowrap ${
+        size === 'md' ? 'px-3 py-1.5 text-xs' : 'px-2.5 py-1 text-[11.5px]'
+      }`}
+      style={{
+        color,
+        backgroundColor: bg,
+        border: `1px solid ${border}`,
+      }}
+    >
+      <Icon
+        size={size === 'md' ? 14 : 12}
+        strokeWidth={2.1}
+        className={animate ? 'animate-spin' : undefined}
+        aria-hidden="true"
+      />
+      <span>{label}</span>
     </span>
   );
 }

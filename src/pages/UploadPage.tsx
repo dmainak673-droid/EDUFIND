@@ -5,7 +5,9 @@ import {
   ArrowRight,
   CheckCircle2,
   FileText,
+  Loader2,
   RefreshCw,
+  RotateCcw,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -26,6 +28,8 @@ function formatBytes(bytes: number): string {
 export default function UploadPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isSubmittingRef = useRef<boolean>(false);
+
   const {
     demoMode,
     setDemoMode,
@@ -33,7 +37,13 @@ export default function UploadPage() {
     checkingHealth,
     refreshHealth,
     liveDocuments,
+    loadingDocuments,
+    documentsError,
+    refreshDocuments,
     addLiveDocument,
+    removeLiveDocument,
+    pendingUploadDoc,
+    setPendingUploadDoc,
   } = useWorkspace();
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -41,13 +51,14 @@ export default function UploadPage() {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadedRecord, setUploadedRecord] = useState<DocumentRecord | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const validateAndSelect = useCallback((file: File | undefined | null) => {
     setValidationError(null);
     setUploadError(null);
-    setUploadedRecord(null);
+    setStatusMessage(null);
     setUploadProgress(0);
 
     if (!file) return;
@@ -78,42 +89,82 @@ export default function UploadPage() {
     setSelectedFile(null);
     setValidationError(null);
     setUploadError(null);
-    setUploadedRecord(null);
+    setStatusMessage(null);
     setUploadProgress(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const handleDismissPending = () => {
+    setPendingUploadDoc(null);
+    handleClear();
+  };
+
   const handleStartVerification = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setUploading(true);
     setUploadError(null);
     setUploadProgress(0);
+    setStatusMessage('Uploading PDF manuscript to server...');
 
     try {
-      const result = await uploadResearchPdf(selectedFile, (pct) => setUploadProgress(pct));
+      // Step 1: Upload the file
+      const result = await uploadResearchPdf(selectedFile, (pct) => {
+        setUploadProgress(pct);
+        if (pct >= 100) {
+          setStatusMessage('Processing PDF pages and metadata on backend...');
+        }
+      });
+
+      const documentId = result.documentId;
       const newDoc: DocumentRecord = {
-        id: result.documentId,
+        id: documentId,
         title: result.title || selectedFile.name.replace(/\.pdf$/i, ''),
         authors: [],
-        publicationInfo: 'Uploaded PDF Manuscript',
+        publicationInfo: 'Uploaded Research PDF',
         fileName: result.fileName,
         fileSizeBytes: result.fileSizeBytes ?? selectedFile.size,
         uploadedAt: new Date().toISOString(),
-        status: 'UPLOADED',
+        status: 'PROCESSING',
         totalClaims: 0,
         totalCitations: 0,
         resolvedCitations: 0,
         unresolvedCitations: 0,
         isDemo: false,
       };
-      setUploadedRecord(newDoc);
+
+      // Step 2: Store in context and persistent storage
       addLiveDocument(newDoc);
-      navigate(`/analysis/${encodeURIComponent(result.documentId)}`);
+      setPendingUploadDoc(newDoc);
+      refreshDocuments().catch(() => {});
+
+      // Step 3: Non-blocking handoff - navigate immediately to AnalysisPage!
+      // AnalysisPage will verify status and initiate the synchronous analysis pipeline
+      // without blocking the user on this upload screen.
+      setStatusMessage('Handoff to analysis monitor...');
+      navigate(`/analysis/${encodeURIComponent(documentId)}`);
     } catch (err) {
       const info = normalizeApiError(err);
       setUploadError(info.message);
+      setStatusMessage(null);
     } finally {
       setUploading(false);
+      isSubmittingRef.current = false;
+    }
+  };
+
+  const handleDeleteDocument = async (id: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (deletingId) return;
+    setDeletingId(id);
+    try {
+      await removeLiveDocument(id);
+    } catch (err) {
+      const info = normalizeApiError(err);
+      setUploadError(`Failed to delete document: ${info.message}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -139,6 +190,42 @@ export default function UploadPage() {
     >
       {demoMode && <DemoDataBanner onSwitchToLive={() => setDemoMode(false)} />}
 
+      {/* Pending Upload Recovery Banner */}
+      {pendingUploadDoc && !demoMode && (
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-[#5578B8]/30 bg-[#5578B8]/8 px-4 py-3.5 text-xs text-[#101B2D]">
+          <div className="flex items-start gap-3">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#5578B8] text-white">
+              <FileText size={16} />
+            </span>
+            <div>
+              <div className="font-semibold text-[#101B2D]">
+                Pending Document Uploaded: {pendingUploadDoc.title}
+              </div>
+              <div className="mt-0.5 text-[#5578B8]">
+                Document ID: {pendingUploadDoc.id} · Stored on backend and ready for verification
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate(`/analysis/${encodeURIComponent(pendingUploadDoc.id)}`)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-[#101B2D] px-3.5 py-1.5 text-xs font-semibold text-[#F5F3ED] transition hover:bg-[#1b2c47]"
+            >
+              <span>Continue Verification</span>
+              <ArrowRight size={13} />
+            </button>
+            <button
+              type="button"
+              onClick={handleDismissPending}
+              className="cursor-pointer rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#71839D] transition hover:text-[#C04444]"
+            >
+              Upload Different PDF
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-12">
         {/* Upload Dropzone Card */}
         <div className="lg:col-span-7">
@@ -147,7 +234,7 @@ export default function UploadPage() {
               Manuscript Upload
             </h2>
             <p className="mt-1 text-xs text-[#71839D]">
-              Uploads directly to <code className="rounded bg-[#F5F3ED] px-1.5 py-0.5 text-[#101B2D]">POST /api/upload</code> on the configured FastAPI backend.
+              Uploads directly to <code className="rounded bg-[#F5F3ED] px-1.5 py-0.5 text-[#101B2D]">POST /api/upload</code> and hands off to live verification monitor.
             </p>
 
             <div
@@ -182,7 +269,8 @@ export default function UploadPage() {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="mt-5 cursor-pointer rounded-full border border-[#101B2D] bg-white px-4 py-2 text-xs font-semibold text-[#101B2D] transition hover:bg-[#101B2D] hover:text-[#F5F3ED]"
+                disabled={uploading}
+                className="mt-5 cursor-pointer rounded-full border border-[#101B2D] bg-white px-4 py-2 text-xs font-semibold text-[#101B2D] transition hover:bg-[#101B2D] hover:text-[#F5F3ED] disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Browse Files
               </button>
@@ -216,7 +304,7 @@ export default function UploadPage() {
                     onClick={handleClear}
                     disabled={uploading}
                     aria-label="Remove selected file"
-                    className="cursor-pointer rounded-lg p-1.5 text-[#71839D] transition hover:bg-white hover:text-[#C04444]"
+                    className="cursor-pointer rounded-lg p-1.5 text-[#71839D] transition hover:bg-white hover:text-[#C04444] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Trash2 size={15} />
                   </button>
@@ -225,7 +313,7 @@ export default function UploadPage() {
                 {uploading && (
                   <div className="mt-4">
                     <div className="mb-1 flex justify-between text-[11px] font-medium text-[#4B586E]">
-                      <span>Uploading PDF to FastAPI backend...</span>
+                      <span>{statusMessage || 'Uploading PDF to FastAPI backend...'}</span>
                       <span>{uploadProgress}%</span>
                     </div>
                     <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#D9DDE3]">
@@ -270,13 +358,6 @@ export default function UploadPage() {
               </div>
             )}
 
-            {uploadedRecord && (
-              <div className="mt-4 flex items-center gap-2.5 rounded-xl border border-[#21875A]/30 bg-[#21875A]/8 px-4 py-3 text-xs text-[#21875A]">
-                <CheckCircle2 size={15} />
-                <span>Uploaded successfully. Redirecting to analysis monitor...</span>
-              </div>
-            )}
-
             <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[#D9DDE3] pt-5">
               <div className="text-xs text-[#71839D]">
                 Never simulates real verification when backend is offline.
@@ -287,8 +368,17 @@ export default function UploadPage() {
                 onClick={handleStartVerification}
                 className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-[#101B2D] px-5 py-2.5 text-xs font-semibold text-[#F5F3ED] transition hover:bg-[#1b2c47] disabled:cursor-not-allowed disabled:opacity-45"
               >
-                <span>{uploading ? 'Uploading...' : 'Start Verification'}</span>
-                <ArrowRight size={14} />
+                {uploading ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>Uploading...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Start Verification</span>
+                    <ArrowRight size={14} />
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -334,13 +424,22 @@ export default function UploadPage() {
 
           <div id="documents" className="rounded-2xl border border-[#D9DDE3] bg-white p-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-[#101B2D]">
-                {demoMode ? 'Sample Research Document (Demo)' : 'My Uploaded Documents'}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold text-[#101B2D]">
+                  {demoMode ? 'Sample Research Document (Demo)' : 'My Uploaded Documents'}
+                </h2>
+                {loadingDocuments && <Loader2 size={13} className="animate-spin text-[#71839D]" />}
+              </div>
               <span className="rounded-md bg-[#F5F3ED] px-2 py-0.5 text-[11px] font-medium text-[#71839D]">
                 {documentsList.length}
               </span>
             </div>
+
+            {documentsError && (
+              <div className="mt-3 rounded-lg border border-[#C04444]/30 bg-[#C04444]/8 p-2.5 text-xs text-[#C04444]">
+                {documentsError}
+              </div>
+            )}
 
             {documentsList.length === 0 ? (
               <div className="mt-4 rounded-xl border border-dashed border-[#D9DDE3] bg-[#F5F3ED]/50 p-5 text-center text-xs text-[#71839D]">
@@ -355,11 +454,24 @@ export default function UploadPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="text-sm font-semibold text-[#101B2D]">{doc.title}</div>
-                      {doc.isDemo && (
-                        <span className="shrink-0 rounded bg-[#101B2D] px-1.5 py-0.5 text-[10px] font-semibold text-[#F5F3ED]">
-                          DEMO
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {doc.isDemo ? (
+                          <span className="rounded bg-[#101B2D] px-1.5 py-0.5 text-[10px] font-semibold text-[#F5F3ED]">
+                            DEMO
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => handleDeleteDocument(doc.id, e)}
+                            disabled={deletingId === doc.id}
+                            title="Delete document from backend"
+                            aria-label={`Delete ${doc.title}`}
+                            className="cursor-pointer rounded p-1 text-[#71839D] transition hover:bg-white hover:text-[#C04444] disabled:opacity-40"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="mt-1 text-xs text-[#71839D]">
                       {doc.authors.length > 0 ? doc.authors.join(', ') : doc.fileName}
@@ -367,19 +479,19 @@ export default function UploadPage() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Link
                         to={`/results/${doc.id}`}
-                        className="rounded-full bg-[#101B2D] px-3 py-1 text-[11.5px] font-medium text-[#F5F3ED] no-underline"
+                        className="rounded-full bg-[#101B2D] px-3 py-1 text-[11.5px] font-medium text-[#F5F3ED] no-underline transition hover:bg-[#1b2c47]"
                       >
                         Open Dashboard
                       </Link>
                       <Link
                         to={`/analysis/${doc.id}`}
-                        className="rounded-full border border-[#D9DDE3] bg-white px-3 py-1 text-[11.5px] font-medium text-[#101B2D] no-underline"
+                        className="rounded-full border border-[#D9DDE3] bg-white px-3 py-1 text-[11.5px] font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
                       >
                         Analysis Stages
                       </Link>
                       <Link
                         to={`/citations/${doc.id}`}
-                        className="rounded-full border border-[#D9DDE3] bg-white px-3 py-1 text-[11.5px] font-medium text-[#101B2D] no-underline"
+                        className="rounded-full border border-[#D9DDE3] bg-white px-3 py-1 text-[11.5px] font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
                       >
                         Citations
                       </Link>

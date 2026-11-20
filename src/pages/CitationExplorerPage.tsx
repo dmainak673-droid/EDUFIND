@@ -9,18 +9,26 @@ import {
 import { WorkspaceLayout } from '../components/layout/WorkspaceLayout';
 import { DemoDataBanner, EvidenceBadge } from '../components/common/StatusBadges';
 import { useWorkspace } from '../context/WorkspaceContext';
-import { fetchDocumentCitations } from '../api/verification';
+import { fetchDocument, fetchDocumentCitations } from '../api/verification';
 import { normalizeApiError } from '../api/client';
 import {
   DEMO_CITATIONS,
   DEMO_DOCUMENTS,
   DEMO_DOCUMENT_ID,
 } from '../data/demoData';
-import type { CitationReference, DocumentRecord } from '../types/verification';
+import {
+  adaptDocumentResponseToRecord,
+  type CitationReference,
+  type DocumentRecord,
+} from '../types/verification';
 
 export default function CitationExplorerPage() {
   const { documentId = DEMO_DOCUMENT_ID } = useParams();
-  const { demoMode, setDemoMode } = useWorkspace();
+  const { demoMode, setDemoMode, activeDocumentId } = useWorkspace();
+
+  const resolvedDocumentId = !demoMode && documentId === DEMO_DOCUMENT_ID && activeDocumentId !== DEMO_DOCUMENT_ID
+    ? activeDocumentId
+    : documentId;
 
   const [doc, setDoc] = useState<DocumentRecord | null>(null);
   const [citations, setCitations] = useState<CitationReference[]>([]);
@@ -32,7 +40,7 @@ export default function CitationExplorerPage() {
     setLoading(true);
     setError(null);
 
-    if (demoMode && documentId === DEMO_DOCUMENT_ID) {
+    if (demoMode && resolvedDocumentId === DEMO_DOCUMENT_ID) {
       setDoc(DEMO_DOCUMENTS[0]);
       setCitations(DEMO_CITATIONS);
       setSelectedCitation(DEMO_CITATIONS[0]);
@@ -41,8 +49,17 @@ export default function CitationExplorerPage() {
     }
 
     try {
-      const res = await fetchDocumentCitations(documentId);
-      setDoc(res.document);
+      const res = await fetchDocumentCitations(resolvedDocumentId);
+      let documentRecord = res.document;
+      if (!documentRecord) {
+        try {
+          const docRes = await fetchDocument(resolvedDocumentId);
+          documentRecord = adaptDocumentResponseToRecord(docRes);
+        } catch {
+          // Document metadata fallback failed
+        }
+      }
+      setDoc(documentRecord);
       setCitations(res.citations);
       setSelectedCitation(res.citations[0] ?? null);
     } catch (err) {
@@ -54,7 +71,7 @@ export default function CitationExplorerPage() {
     } finally {
       setLoading(false);
     }
-  }, [demoMode, documentId]);
+  }, [demoMode, resolvedDocumentId]);
 
   useEffect(() => {
     loadCitations();
@@ -72,7 +89,7 @@ export default function CitationExplorerPage() {
       subtitle="Interactive citation graph mapping the uploaded paper to its resolved and unresolved references"
       actions={
         <Link
-          to={`/results/${encodeURIComponent(documentId)}`}
+          to={`/results/${encodeURIComponent(resolvedDocumentId)}`}
           className="rounded-full border border-[#D9DDE3] bg-white px-4 py-2 text-xs font-medium text-[#101B2D] no-underline hover:border-[#101B2D]"
         >
           Return to Overview
@@ -135,7 +152,15 @@ export default function CitationExplorerPage() {
             </div>
 
             <div className="overflow-hidden rounded-xl border border-[#ECEFF3] bg-[#F5F3ED]/45">
-              <svg viewBox="0 0 640 440" className="h-auto w-full select-none">
+              {citations.length === 0 ? (
+                <div className="flex h-72 flex-col items-center justify-center p-8 text-center text-xs text-[#71839D]">
+                  <p className="text-sm font-semibold text-[#101B2D]">No Citations Identified</p>
+                  <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-[#71839D]">
+                    No bibliographic references were identified in this manuscript, or citation extraction is still processing.
+                  </p>
+                </div>
+              ) : (
+                <svg viewBox="0 0 640 440" className="h-auto w-full select-none">
                 {/* Edges */}
                 {citations.map((cit, idx) => {
                   const angle = (idx / Math.max(1, citations.length)) * Math.PI * 2 - Math.PI / 2;
@@ -240,6 +265,7 @@ export default function CitationExplorerPage() {
                   );
                 })}
               </svg>
+              )}
             </div>
           </div>
 

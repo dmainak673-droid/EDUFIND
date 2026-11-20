@@ -5,7 +5,7 @@ export const API_BASE_URL =
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 20_000,
+  timeout: 30_000,
   headers: {
     Accept: 'application/json',
   },
@@ -25,19 +25,34 @@ export function normalizeApiError(error: unknown): ApiErrorInfo {
         message: `Cannot reach FastAPI backend at ${API_BASE_URL}. Start the backend server or inspect Demo Mode.`,
       };
     }
-    if (error.response.status === 404 || error.response.status === 405 || error.response.status === 501) {
+    if (
+      error.response.status === 404 ||
+      error.response.status === 405 ||
+      error.response.status === 501
+    ) {
       return {
         code: 'ENDPOINT_NOT_IMPLEMENTED',
         status: error.response.status,
         message: `Endpoint not yet implemented on the FastAPI backend (HTTP ${error.response.status}).`,
       };
     }
-    const detail =
-      typeof error.response.data === 'object' &&
-      error.response.data !== null &&
-      'detail' in error.response.data
-        ? String((error.response.data as { detail: unknown }).detail)
-        : error.message;
+
+    let detail = error.message;
+    if (typeof error.response.data === 'object' && error.response.data !== null) {
+      const data = error.response.data as { detail?: unknown; message?: unknown };
+      if (typeof data.detail === 'string') {
+        detail = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        detail = data.detail
+          .map((d: { loc?: unknown[]; msg?: string }) =>
+            d && d.msg ? `${Array.isArray(d.loc) ? d.loc.join('.') : ''}: ${d.msg}` : JSON.stringify(d),
+          )
+          .join('; ');
+      } else if (typeof data.message === 'string') {
+        detail = data.message;
+      }
+    }
+
     return {
       code: 'REQUEST_FAILED',
       status: error.response.status,

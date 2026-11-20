@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Bar,
@@ -14,12 +14,21 @@ import {
 } from 'recharts';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowUpDown,
+  CheckCircle2,
+  Clock,
   Download,
   ExternalLink,
+  FileCheck2,
+  FileText,
   GitFork,
+  Layers,
   Loader2,
+  RefreshCw,
   Search,
+  Upload,
+  WifiOff,
 } from 'lucide-react';
 import { WorkspaceLayout } from '../components/layout/WorkspaceLayout';
 import {
@@ -40,6 +49,7 @@ import {
   EVIDENCE_META,
   VERDICT_META,
   VERDICT_ORDER,
+  type AnalysisRunResponse,
   type CitationReference,
   type ClaimRecord,
   type DocumentRecord,
@@ -50,16 +60,46 @@ import {
 const PAGE_SIZE = 5;
 
 export default function DashboardPage() {
-  const { documentId = DEMO_DOCUMENT_ID } = useParams();
+  const { documentId: routeDocumentId } = useParams();
   const navigate = useNavigate();
-  const { demoMode, setDemoMode, setActiveDocumentId } = useWorkspace();
+  const {
+    demoMode,
+    setDemoMode,
+    liveDocuments,
+    loadingDocuments,
+    refreshDocuments,
+    backendHealth,
+    refreshHealth,
+    activeDocumentId,
+    setActiveDocumentId,
+  } = useWorkspace();
+
+  // Effective document ID resolution
+  const resolvedDocumentId = useMemo(() => {
+    if (demoMode) {
+      return routeDocumentId || DEMO_DOCUMENT_ID;
+    }
+    // In live mode, prefer route param if not demo ID, otherwise use activeDocumentId or first live doc
+    if (routeDocumentId && routeDocumentId !== DEMO_DOCUMENT_ID) {
+      return routeDocumentId;
+    }
+    if (activeDocumentId && activeDocumentId !== DEMO_DOCUMENT_ID) {
+      return activeDocumentId;
+    }
+    if (liveDocuments.length > 0) {
+      return liveDocuments[0].id;
+    }
+    return '';
+  }, [demoMode, routeDocumentId, activeDocumentId, liveDocuments]);
 
   const [doc, setDoc] = useState<DocumentRecord | null>(null);
+  const [analysisRun, setAnalysisRun] = useState<AnalysisRunResponse | null>(null);
   const [claims, setClaims] = useState<ClaimRecord[]>([]);
   const [citations, setCitations] = useState<CitationReference[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Filters, search, pagination, selection
   const [searchQuery, setSearchQuery] = useState('');
   const [verdictFilter, setVerdictFilter] = useState<VerificationVerdict | 'ALL'>('ALL');
   const [sortField, setSortField] = useState<'claimId' | 'verdict' | 'confidence'>('claimId');
@@ -67,50 +107,93 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  useEffect(() => {
-    setActiveDocumentId(documentId);
-  }, [documentId, setActiveDocumentId]);
+  // Request sequence counter to discard stale async responses
+  const requestSeqRef = useRef<number>(0);
 
+  useEffect(() => {
+    if (resolvedDocumentId) {
+      setActiveDocumentId(resolvedDocumentId);
+    }
+  }, [resolvedDocumentId, setActiveDocumentId]);
+
+  // Load results for the target document
   const loadResults = useCallback(async () => {
+    const currentSeq = ++requestSeqRef.current;
     setLoading(true);
     setError(null);
 
-    if (demoMode && documentId === DEMO_DOCUMENT_ID) {
-      setDoc(DEMO_DOCUMENTS[0]);
+    // DEMO MODE: completely isolated from live backend data
+    if (demoMode) {
+      const demoDoc = DEMO_DOCUMENTS.find((d) => d.id === resolvedDocumentId) || DEMO_DOCUMENTS[0];
+      setDoc(demoDoc);
       setClaims(DEMO_CLAIMS);
       setCitations(DEMO_CITATIONS);
+      setAnalysisRun(null);
+      setLoading(false);
+      return;
+    }
+
+    // LIVE MODE: if no live documents exist, don't attempt backend query for dummy ID
+    if (!resolvedDocumentId) {
+      setDoc(null);
+      setClaims([]);
+      setCitations([]);
+      setAnalysisRun(null);
       setLoading(false);
       return;
     }
 
     try {
-      const res = await fetchDocumentResults(documentId);
+      const res = await fetchDocumentResults(resolvedDocumentId);
+      if (currentSeq !== requestSeqRef.current) return;
+
       setDoc(res.document);
       setClaims(res.claims);
       setCitations(res.citations);
+      setAnalysisRun(res.analysis ?? null);
     } catch (err) {
+      if (currentSeq !== requestSeqRef.current) return;
       const info = normalizeApiError(err);
       setError(info.message);
       setDoc(null);
       setClaims([]);
       setCitations([]);
+      setAnalysisRun(null);
     } finally {
-      setLoading(false);
+      if (currentSeq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [demoMode, documentId]);
+  }, [demoMode, resolvedDocumentId]);
 
   useEffect(() => {
     loadResults();
   }, [loadResults]);
 
+  // Overall Statistics across documents (Requirement 2)
+  const totalUploadedDocs = demoMode ? DEMO_DOCUMENTS.length : liveDocuments.length;
+  const totalAnalyzedDocs = demoMode
+    ? DEMO_DOCUMENTS.length
+    : liveDocuments.filter((d) => d.status === 'COMPLETED' || d.extractionStatus === 'EXTRACTED').length;
+  const failedAnalysesCount = demoMode
+    ? 0
+    : liveDocuments.filter((d) => d.status === 'FAILED').length;
+  const warningAnalysesCount = demoMode
+    ? 1
+    : (analysisRun?.warning_count ?? analysisRun?.warningCount ?? 0) +
+      liveDocuments.filter((d) => Boolean(d.extractionWarning)).length;
+
+  // Verdict distribution calculations
   const verdictCounts = useMemo(() => {
     const counts: Record<VerificationVerdict, number> = {
       SUPPORTED: 0,
       PARTIALLY_SUPPORTED: 0,
       UNSUPPORTED: 0,
       CONTRADICTORY: 0,
+      CONTRADICTED: 0,
       POTENTIALLY_OUTDATED: 0,
       INSUFFICIENT_EVIDENCE: 0,
+      UNVERIFIABLE: 0,
     };
     claims.forEach((c) => {
       counts[c.verificationVerdict] = (counts[c.verificationVerdict] || 0) + 1;
@@ -158,6 +241,7 @@ export default function DashboardPage() {
     ];
   }, [citations]);
 
+  // Claims filtering and sorting
   const filteredClaims = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list = claims.filter((c) => {
@@ -210,6 +294,7 @@ export default function DashboardPage() {
     if (!doc) return;
     const payload = {
       document: doc,
+      analysis: analysisRun,
       verdictSummary: verdictCounts,
       claims,
       citations,
@@ -234,57 +319,161 @@ export default function DashboardPage() {
         )
       : 0;
 
+  // Active status display
+  const currentStatus = analysisRun?.status || doc?.status || 'UPLOADED';
+
   return (
     <WorkspaceLayout
       title="Research Verification Overview"
       subtitle={
         doc
-          ? `${doc.title} · Status: ${doc.status}${
-              doc.lastAnalyzedAt
-                ? ` · Last analyzed ${new Date(doc.lastAnalyzedAt).toLocaleString()}`
-                : ''
+          ? `${doc.title} · Status: ${currentStatus}${
+              doc.uploadedAt ? ` · Uploaded ${new Date(doc.uploadedAt).toLocaleDateString()}` : ''
             }`
-          : `Document ID: ${documentId}`
+          : demoMode
+            ? 'Demo Scientific Literature Verification Suite'
+            : 'Live Research Document Workspace'
       }
       actions={
-        doc && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Link
-              to={`/citations/${encodeURIComponent(doc.id)}`}
-              className="inline-flex items-center gap-1.5 rounded-full border border-[#D9DDE3] bg-white px-3.5 py-2 text-xs font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Document Switcher for Live Mode */}
+          {!demoMode && liveDocuments.length > 1 && (
+            <select
+              value={resolvedDocumentId}
+              onChange={(e) => navigate(`/results/${encodeURIComponent(e.target.value)}`)}
+              className="cursor-pointer rounded-full border border-[#D9DDE3] bg-white px-3.5 py-1.5 text-xs font-medium text-[#101B2D] transition focus:outline-none focus:ring-1 focus:ring-[#101B2D]"
+              aria-label="Select uploaded document"
             >
-              <GitFork size={13} />
-              <span>Citation Explorer</span>
-            </Link>
-            <button
-              type="button"
-              onClick={handleDownloadReport}
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-[#101B2D] px-4 py-2 text-xs font-semibold text-[#F5F3ED] transition hover:bg-[#1b2c47]"
-            >
-              <Download size={13} />
-              <span>Download Report</span>
-            </button>
-          </div>
-        )
+              {liveDocuments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.title.length > 32 ? `${d.title.slice(0, 32)}...` : d.title} ({d.status})
+                </option>
+              ))}
+            </select>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              refreshDocuments();
+              loadResults();
+            }}
+            disabled={loading || loadingDocuments}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#101B2D] transition hover:border-[#101B2D] disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            <span>Refresh</span>
+          </button>
+
+          {doc && (
+            <>
+              <Link
+                to={`/analysis/${encodeURIComponent(doc.id)}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
+              >
+                <Clock size={13} />
+                <span>Pipeline Status</span>
+              </Link>
+              <Link
+                to={`/citations/${encodeURIComponent(doc.id)}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#101B2D] no-underline transition hover:border-[#101B2D]"
+              >
+                <GitFork size={13} />
+                <span>Citation Explorer</span>
+              </Link>
+              <button
+                type="button"
+                onClick={handleDownloadReport}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-[#101B2D] px-3.5 py-1.5 text-xs font-semibold text-[#F5F3ED] transition hover:bg-[#1b2c47]"
+              >
+                <Download size={13} />
+                <span>Download Report</span>
+              </button>
+            </>
+          )}
+        </div>
       }
     >
-      {doc?.isDemo && <DemoDataBanner onSwitchToLive={() => setDemoMode(false)} />}
+      {demoMode && <DemoDataBanner onSwitchToLive={() => setDemoMode(false)} />}
 
+      {/* OFFLINE STATE (Live Mode when backend health check failed) */}
+      {!demoMode && backendHealth && !backendHealth.online && (
+        <div className="mb-6 rounded-2xl border border-[#C04444]/30 bg-[#C04444]/8 p-6">
+          <div className="flex items-start gap-3">
+            <WifiOff size={22} className="mt-0.5 shrink-0 text-[#C04444]" />
+            <div>
+              <h2 className="text-base font-semibold text-[#101B2D]">
+                Backend Service Offline
+              </h2>
+              <p className="mt-1 text-sm text-[#4B586E]">
+                Unable to connect to the EDUFIND FastAPI server at <code>/api/health</code>.
+                Make sure the backend server is running on <code>http://localhost:8000</code>.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  refreshHealth();
+                  loadResults();
+                }}
+                className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-[#101B2D] px-4 py-2 text-xs font-semibold text-[#F5F3ED]"
+              >
+                <RefreshCw size={13} />
+                <span>Retry Backend Connection</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LOADING STATE */}
       {loading ? (
         <div className="flex items-center justify-center rounded-2xl border border-[#D9DDE3] bg-white py-20 text-sm text-[#71839D]">
           <Loader2 size={18} className="mr-2 animate-spin text-[#101B2D]" />
-          Loading verification analytics...
+          Loading verification analytics and document results...
+        </div>
+      ) : !demoMode && liveDocuments.length === 0 ? (
+        /* EMPTY STATE: Live Mode with 0 documents */
+        <div className="rounded-2xl border border-dashed border-[#D9DDE3] bg-white p-12 text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#F5F3ED] text-[#101B2D]">
+            <Upload size={24} />
+          </div>
+          <h2 className="mt-4 text-base font-semibold text-[#101B2D]">
+            No Research Papers Verified Yet
+          </h2>
+          <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-[#71839D]">
+            Upload a scientific PDF to run the automated claim extraction, citation resolution, and multi-source evidence verification pipeline.
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Link
+              to="/upload"
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#101B2D] px-5 py-2.5 text-xs font-semibold text-[#F5F3ED] no-underline transition hover:bg-[#1b2c47]"
+            >
+              <Upload size={14} />
+              <span>Upload Scientific PDF</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => {
+                setDemoMode(true);
+                navigate(`/results/${DEMO_DOCUMENT_ID}`);
+              }}
+              className="cursor-pointer rounded-full border border-[#D9DDE3] bg-[#F5F3ED] px-4 py-2.5 text-xs font-medium text-[#101B2D]"
+            >
+              Inspect Demo Dataset
+            </button>
+          </div>
         </div>
       ) : error || !doc ? (
+        /* ERROR STATE */
         <div className="rounded-2xl border border-[#D9DDE3] bg-white p-8">
           <div className="flex items-start gap-3">
             <AlertCircle size={20} className="mt-0.5 shrink-0 text-[#C04444]" />
             <div>
               <h2 className="text-base font-semibold text-[#101B2D]">
-                Verification results not available from backend
+                Verification Results Unavailable
               </h2>
               <p className="mt-1.5 max-w-xl text-sm text-[#4B586E]">
-                {error || 'No verification dataset found for this document ID.'}
+                {error || `No verification dataset could be retrieved for document ID: ${resolvedDocumentId}`}
               </p>
               <div className="mt-5 flex flex-wrap gap-2.5">
                 <button
@@ -294,6 +483,12 @@ export default function DashboardPage() {
                 >
                   Retry
                 </button>
+                <Link
+                  to="/upload"
+                  className="inline-flex items-center gap-1 rounded-full border border-[#D9DDE3] bg-white px-4 py-2 text-xs font-medium text-[#101B2D] no-underline"
+                >
+                  <span>Upload New Document</span>
+                </Link>
                 <button
                   type="button"
                   onClick={() => {
@@ -302,20 +497,98 @@ export default function DashboardPage() {
                   }}
                   className="cursor-pointer rounded-full border border-[#D9DDE3] bg-[#F5F3ED] px-4 py-2 text-xs font-medium text-[#101B2D]"
                 >
-                  Open Demo Verification Dashboard
+                  Open Demo Mode
                 </button>
               </div>
             </div>
           </div>
         </div>
       ) : (
+        /* MAIN DASHBOARD CONTENT */
         <div className="space-y-6">
-          {/* 7 Statistics Cards */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
-            <div className="rounded-xl border border-[#D9DDE3] bg-[#101B2D] p-4 text-[#F5F3ED]">
-              <div className="text-[11px] font-medium text-[#9FB0C8]">Total Claims</div>
-              <div className="mt-2 text-2xl font-semibold tracking-tight">{claims.length}</div>
+          {/* Top Metric Cards: Requirement 2 (Total uploaded, analyzed, status, warnings) */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            <div className="rounded-xl border border-[#D9DDE3] bg-white p-4">
+              <div className="flex items-center justify-between text-[11px] text-[#71839D]">
+                <span>Total Uploaded</span>
+                <Layers size={13} className="text-[#5578B8]" />
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-[#101B2D]">
+                {totalUploadedDocs}
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-[#71839D]">
+                {demoMode ? 'Demo sample papers' : 'Total workspace files'}
+              </div>
             </div>
+
+            <div className="rounded-xl border border-[#D9DDE3] bg-white p-4">
+              <div className="flex items-center justify-between text-[11px] text-[#71839D]">
+                <span>Total Analyzed</span>
+                <FileCheck2 size={13} className="text-[#21875A]" />
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-[#21875A]">
+                {totalAnalyzedDocs}
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-[#71839D]">
+                Completed verification
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[#D9DDE3] bg-white p-4">
+              <div className="flex items-center justify-between text-[11px] text-[#71839D]">
+                <span>Active Status</span>
+                <Clock size={13} className="text-[#5578B8]" />
+              </div>
+              <div className="mt-2 truncate text-base font-semibold tracking-tight text-[#101B2D]">
+                {currentStatus}
+              </div>
+              <div className="mt-0.5 truncate text-[10.5px] text-[#71839D]">
+                {analysisRun?.current_stage || analysisRun?.currentStage || `${claims.length} claims recorded`}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[#D9DDE3] bg-white p-4">
+              <div className="flex items-center justify-between text-[11px] text-[#71839D]">
+                <span>Warnings</span>
+                <AlertTriangle size={13} className="text-[#B17B26]" />
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-[#B17B26]">
+                {warningAnalysesCount}
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-[#71839D]">
+                Extraction / quality notices
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[#D9DDE3] bg-white p-4">
+              <div className="flex items-center justify-between text-[11px] text-[#71839D]">
+                <span>Failed Runs</span>
+                <AlertCircle size={13} className="text-[#C04444]" />
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-[#C04444]">
+                {failedAnalysesCount}
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-[#71839D]">
+                Failed analysis runs
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[#D9DDE3] bg-[#101B2D] p-4 text-[#F5F3ED]">
+              <div className="flex items-center justify-between text-[11px] text-[#9FB0C8]">
+                <span>Total Claims</span>
+                <FileText size={13} />
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight">
+                {claims.length}
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-[#9FB0C8]">
+                {evidenceCoveragePct}% evidence coverage
+              </div>
+            </div>
+          </div>
+
+          {/* Verdict Distribution Quick Filter Buttons */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
             {VERDICT_ORDER.map((v) => (
               <button
                 key={v}
@@ -324,24 +597,25 @@ export default function DashboardPage() {
                   setVerdictFilter((prev) => (prev === v ? 'ALL' : v));
                   setPage(1);
                 }}
-                className={`cursor-pointer rounded-xl border p-4 text-left transition ${
+                className={`cursor-pointer rounded-xl border p-3.5 text-left transition ${
                   verdictFilter === v
-                    ? 'border-[#101B2D] bg-white ring-1 ring-[#101B2D]'
-                    : 'border-[#D9DDE3] bg-white hover:border-[#71839D]'
+                    ? 'border-[#101B2D] bg-[#101B2D] text-[#F5F3ED] shadow-sm'
+                    : 'border-[#D9DDE3] bg-white text-[#101B2D] hover:border-[#101B2D]/40'
                 }`}
               >
-                <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#71839D]">
+                <div
+                  className={`text-[10.5px] font-medium tracking-tight ${
+                    verdictFilter === v ? 'text-[#9FB0C8]' : 'text-[#71839D]'
+                  }`}
+                >
+                  {VERDICT_META[v].label}
+                </div>
+                <div className="mt-1.5 flex items-baseline justify-between">
+                  <span className="text-xl font-bold">{verdictCounts[v]}</span>
                   <span
                     className="h-2 w-2 rounded-full"
                     style={{ backgroundColor: VERDICT_META[v].color }}
                   />
-                  <span className="truncate">{VERDICT_META[v].shortLabel}</span>
-                </div>
-                <div
-                  className="mt-2 text-2xl font-semibold tracking-tight"
-                  style={{ color: VERDICT_META[v].color }}
-                >
-                  {verdictCounts[v]}
                 </div>
               </button>
             ))}
@@ -483,7 +757,79 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Interactive Claims Table */}
+          {/* RECENT ANALYSIS ACTIVITY: Requirement 2 */}
+          <div className="rounded-2xl border border-[#D9DDE3] bg-white p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-[#101B2D]">
+                  Recent Analysis Activity
+                </h2>
+                <p className="mt-0.5 text-xs text-[#71839D]">
+                  {demoMode ? 'Sample literature datasets' : 'Recently uploaded and analyzed documents in this workspace'}
+                </p>
+              </div>
+              <Link
+                to="/upload"
+                className="inline-flex items-center gap-1 text-xs font-medium text-[#101B2D] no-underline hover:underline"
+              >
+                <span>Upload New</span>
+                <ExternalLink size={11} />
+              </Link>
+            </div>
+
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-[#ECEFF3] text-[11px] font-semibold text-[#71839D]">
+                    <th className="pb-2.5">Document Title</th>
+                    <th className="pb-2.5">Pages</th>
+                    <th className="pb-2.5">Claims</th>
+                    <th className="pb-2.5">Citations</th>
+                    <th className="pb-2.5">Status</th>
+                    <th className="pb-2.5 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#ECEFF3]">
+                  {(demoMode ? DEMO_DOCUMENTS : liveDocuments.slice(0, 5)).map((item) => (
+                    <tr
+                      key={item.id}
+                      className={`hover:bg-[#F5F3ED]/40 transition ${
+                        item.id === doc.id ? 'bg-[#F5F3ED]/60 font-medium' : ''
+                      }`}
+                    >
+                      <td className="py-2.5 pr-4 text-[#101B2D]">
+                        <div className="truncate max-w-sm">{item.title}</div>
+                        <div className="text-[10px] text-[#71839D]">{item.fileName}</div>
+                      </td>
+                      <td className="py-2.5 text-[#4B586E]">{item.pageCount ?? '—'}</td>
+                      <td className="py-2.5 text-[#4B586E]">{item.totalClaims}</td>
+                      <td className="py-2.5 text-[#4B586E]">{item.totalCitations}</td>
+                      <td className="py-2.5">
+                        <span className="inline-flex items-center rounded-md bg-[#101B2D]/8 px-2 py-0.5 text-[10.5px] font-medium text-[#101B2D]">
+                          {item.status}
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-right">
+                        {item.id === doc.id ? (
+                          <span className="text-[11px] font-semibold text-[#21875A]">Active</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/results/${encodeURIComponent(item.id)}`)}
+                            className="cursor-pointer text-[11px] font-medium text-[#5578B8] hover:underline"
+                          >
+                            Inspect
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Interactive Scientific Claims Table (Requirement 3) */}
           <div className="rounded-2xl border border-[#D9DDE3] bg-white">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#D9DDE3] px-5 py-4">
               <div>
@@ -509,52 +855,70 @@ export default function DashboardPage() {
                       setSearchQuery(e.target.value);
                       setPage(1);
                     }}
-                    placeholder="Search claims or citations..."
-                    className="w-56 rounded-full border border-[#D9DDE3] bg-[#F5F3ED]/60 py-1.5 pr-3 pl-8 text-xs text-[#101B2D] placeholder:text-[#71839D] focus:border-[#101B2D] focus:outline-none"
+                    placeholder="Search claims or cited sources..."
+                    className="h-8.5 rounded-full border border-[#D9DDE3] bg-[#F5F3ED]/40 pr-3 pl-8.5 text-xs text-[#111318] placeholder-[#71839D] transition focus:border-[#101B2D] focus:bg-white focus:outline-none"
                   />
                 </div>
-                <select
-                  value={verdictFilter}
-                  onChange={(e) => {
-                    setVerdictFilter(e.target.value as VerificationVerdict | 'ALL');
-                    setPage(1);
-                  }}
-                  aria-label="Filter by verification verdict"
-                  className="rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#101B2D] focus:border-[#101B2D] focus:outline-none"
-                >
-                  <option value="ALL">All Verdicts</option>
-                  {VERDICT_ORDER.map((v) => (
-                    <option key={v} value={v}>
-                      {VERDICT_META[v].label}
-                    </option>
-                  ))}
-                </select>
+                {verdictFilter !== 'ALL' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVerdictFilter('ALL');
+                      setPage(1);
+                    }}
+                    className="cursor-pointer rounded-full border border-[#D9DDE3] bg-white px-3 py-1.5 text-xs font-medium text-[#71839D] hover:text-[#101B2D]"
+                  >
+                    Clear Filter ({verdictFilter})
+                  </button>
+                )}
               </div>
             </div>
 
+            {/* Claims Table */}
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left text-xs">
+              <table className="w-full text-left text-xs">
                 <thead>
-                  <tr className="border-b border-[#D9DDE3] bg-[#F5F3ED]/60 text-[11px] font-semibold text-[#71839D] uppercase">
+                  <tr className="border-b border-[#ECEFF3] bg-[#F5F3ED]/30 text-[11px] font-semibold text-[#71839D]">
                     <th className="w-10 px-4 py-3">
-                      <span className="sr-only">Select</span>
+                      <input
+                        type="checkbox"
+                        checked={
+                          paginatedClaims.length > 0 &&
+                          paginatedClaims.every((c) => selectedIds.includes(c.claimId))
+                        }
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedIds((prev) => [
+                              ...prev,
+                              ...paginatedClaims
+                                .map((c) => c.claimId)
+                                .filter((id) => !prev.includes(id)),
+                            ]);
+                          } else {
+                            const ids = new Set(paginatedClaims.map((c) => c.claimId));
+                            setSelectedIds((prev) => prev.filter((id) => !ids.has(id)));
+                          }
+                        }}
+                        aria-label="Select all on this page"
+                        className="h-3.5 w-3.5 accent-[#101B2D]"
+                      />
                     </th>
                     <th className="px-3 py-3">
                       <button
                         type="button"
                         onClick={() => toggleSort('claimId')}
-                        className="inline-flex cursor-pointer items-center gap-1 uppercase"
+                        className="inline-flex cursor-pointer items-center gap-1 font-semibold text-[#71839D]"
                       >
                         <span>Claim ID</span>
                         <ArrowUpDown size={11} />
                       </button>
                     </th>
-                    <th className="px-3 py-3">Extracted Claim</th>
+                    <th className="px-3 py-3">Claim &amp; Context</th>
                     <th className="px-3 py-3">
                       <button
                         type="button"
                         onClick={() => toggleSort('verdict')}
-                        className="inline-flex cursor-pointer items-center gap-1 uppercase"
+                        className="inline-flex cursor-pointer items-center gap-1 font-semibold text-[#71839D]"
                       >
                         <span>Verdict</span>
                         <ArrowUpDown size={11} />
@@ -565,7 +929,7 @@ export default function DashboardPage() {
                       <button
                         type="button"
                         onClick={() => toggleSort('confidence')}
-                        className="inline-flex cursor-pointer items-center gap-1 uppercase"
+                        className="inline-flex cursor-pointer items-center gap-1 font-semibold text-[#71839D]"
                       >
                         <span>Confidence</span>
                         <ArrowUpDown size={11} />
@@ -578,7 +942,7 @@ export default function DashboardPage() {
                   {paginatedClaims.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-5 py-10 text-center text-xs text-[#71839D]">
-                        No claims match your current search or verdict filter.
+                        No scientific claims match your search or filter query.
                       </td>
                     </tr>
                   ) : (
@@ -643,7 +1007,7 @@ export default function DashboardPage() {
               </table>
             </div>
 
-            {/* Pagination */}
+            {/* Pagination Controls */}
             <div className="flex items-center justify-between border-t border-[#D9DDE3] px-5 py-3 text-xs text-[#71839D]">
               <span>
                 Page {safePage} of {totalPages}
