@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+  import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '' : 'http://127.0.0.1:8000');
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const envTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
